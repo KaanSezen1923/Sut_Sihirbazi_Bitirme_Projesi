@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  sut-sihirbazi-api:
+    build: .
+    container_name: sut_sihirbazi_api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Çiftlik verisinin container dışında da güncellenebilmesi için canlı bağlıyoruz
+      - ./data.csv:/app/data.csv
+      # 1.5 GB'lık Whisper modelinin her restartta sıfırdan indirilmesini önleyen volume
+      - whisper_model_cache:/root/.cache/whisper
+    environment:
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=${DB_HOST}
+      - DB_NAME=${DB_NAME}
+      - CLOUD_LLM=${CLOUD_LLM}
+      - LOCAL_LLM=${LOCAL_LLM}
+      # Docker ağı içinden lokaldeki Ollama'ya yönlendirme
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Container'ın kendi bilgisayarınızdaki (Host machine) Ollama'ya erişebilmesi için köprü
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+volumes:
+  whisper_model_cache:
