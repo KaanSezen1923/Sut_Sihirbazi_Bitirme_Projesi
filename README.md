@@ -28,22 +28,8 @@ Uygulamayı açtığınızda sizi yeşil temalı bir ahır ikonu ve aşağıdaki
 
 ### Ekran Düzeni
 
-```
-┌─────────────────────────────┐
-│  🐄 Süt Sihirbazı           │  ← Üst Başlık
-├─────────────────────────────┤
-│                             │
-│    Sohbet Mesajları         │  ← Mesaj Alanı
-│                             │
-│  [Bot] Merhaba! ...         │
-│         [Kullanıcı] ...     │
-│                             │
-├─────────────────────────────┤
-│  [Sihirbaza sorun... ] [🎤] │  ← Giriş Alanı
-└─────────────────────────────┘
-```
+<img width="313" height="587" alt="image" src="https://github.com/user-attachments/assets/cb6e2e05-bbad-4737-ad98-f63a6555be88" />
 
----
 
 ## 📖 Adım Adım Kullanım
 
