@@ -12,7 +12,6 @@
 | 🎤 **Sesli Soru Sorma** | Mikrofon butonuna basıp sesinizle soru sorun, uygulama sizi dinler |
 | 🔊 **Sesli Yanıt (TTS)** | Botun verdiği cevapları hoparlör simgesine dokunarak sesli dinleyin |
 | 📊 **Veri Sorgulama** | SQL veritabanındaki güncel çiftlik verilerini sorgulayın |
-| 📋 **CSV Analizi** | CSV dosyalarındaki veriler üzerinden analiz ve rapor alın |
 | 📝 **Markdown Desteği** | Yanıtlar tablolar, kalın yazı ve listelerle zengin biçimde sunulur |
 | ⏱️ **Yanıt Süresi** | Her cevabın sonunda yanıt süresi gösterilir |
 | 🔄 **Adım Göstergesi** | Sorgu işlenirken hangi aşamada olduğunuz canlı olarak gösterilir |
