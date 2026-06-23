@@ -31,7 +31,7 @@ interface Message {
 }
 
 //const API_URL ='http://10.0.2.2:8000';
-const API_URL = 'http://localhost:8000';
+const API_URL = 'http://localhost:8000'; // telefondan fiziksel test yapmak için localhost yerine kendi yerel IPv4 adresinizi yazın. 
 
 // --- MARKDOWN KURALLARI (Tablo Düzeni) ---
 const markdownRules: RenderRules = {
