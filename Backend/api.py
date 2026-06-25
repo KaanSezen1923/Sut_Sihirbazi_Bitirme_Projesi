@@ -68,25 +68,37 @@ def read_root():
 # === SQL RAG ENDPOINTLERİ ===
 async def sql_query_stream(question: str) -> AsyncGenerator[str, None]:
     yield sse_event({"step": "Sorunuz analiz ediliyor...", "done": False})
-    await asyncio.sleep(0)
+    
+    final_state = {"question": question}
+    
+    try:
+        # LangGraph'ın astream özelliğini kullanarak düğüm (node) geçişlerini gerçek zamanlı dinliyoruz
+        async for output in rag_app.astream({"question": question}, stream_mode="updates"):
+            for node_name, state_update in output.items():
+                # Her adımda ana state'i güncelliyoruz
+                final_state.update(state_update)
+                
+                # Hangi düğümün çalıştığına göre dinamik SSE mesajı gönderiyoruz
+                if node_name == "classify":
+                    if state_update.get("classification") == "sql":
+                        yield sse_event({"step": "Veritabanı için SQL sorgusu oluşturuluyor...", "done": False})
+                    else:
+                        yield sse_event({"step": "Sihirbaz yanıtı hazırlıyor...", "done": False})
+                elif node_name == "write_query":
+                    yield sse_event({"step": "Veritabanından veriler alınıyor...", "done": False})
+                elif node_name == "execute_query":
+                    yield sse_event({"step": "Yanıt doğal dile çevriliyor...", "done": False})
+                    
+    except Exception as e:
+        print(f"Graph çalışma hatası: {e}")
+        yield sse_event({"step": "Bir hata oluştu...", "done": True, "answer": "Üzgünüm, işleminizi gerçekleştirirken bir hata oluştu."})
+        return
 
-    yield sse_event({"step": "SQL sorgusu oluşturuluyor...", "done": False})
-    await asyncio.sleep(0)
-
-    loop = asyncio.get_event_loop()
-    state = {"question": question}
-    final_state = await loop.run_in_executor(None, rag_app.invoke, state)
-
-    yield sse_event({"step": "Veritabanından veriler alınıyor...", "done": False})
-    await asyncio.sleep(0)
-
-    yield sse_event({"step": "Yanıt hazırlanıyor...", "done": False})
-    await asyncio.sleep(0)
-
+    # Akış bittiğinde son durumu (done: True) ve cevapları gönder
     yield sse_event({
         "done": True,
-        "answer": final_state["answer"],
-        "classification": final_state["classification"],
+        "answer": final_state.get("answer", "Yanıt oluşturulamadı."),
+        "classification": final_state.get("classification", "general"),
         "sql_query": final_state.get("query"),
         "sql_result": final_state.get("result"),
     })
