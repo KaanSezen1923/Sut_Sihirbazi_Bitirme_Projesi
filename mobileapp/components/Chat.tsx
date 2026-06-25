@@ -19,19 +19,18 @@ import {
 import Markdown, { RenderRules } from 'react-native-markdown-display';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
-import { useStreamingSteps } from "@/hooks/useStreamingSteps";
 import { StepIndicator } from './StepIndicator';
 
 interface Message {
   id: string;
   text: string;
-  spokenText?: string; // TTS'e gönderilecek temiz metin (süre etiketi olmadan)
+  spokenText?: string;
   sender: 'user' | 'bot';
   timestamp: Date;
 }
 
 //const API_URL ='http://10.0.2.2:8000';
-const API_URL = 'http://localhost:8000'; // telefondan fiziksel test yapmak için localhost yerine kendi yerel IPv4 adresinizi yazın. 
+const API_URL = 'http://localhost:8000';
 
 // --- MARKDOWN KURALLARI (Tablo Düzeni) ---
 const markdownRules: RenderRules = {
@@ -72,10 +71,11 @@ const Chat = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
-  const [speakingId, setSpeakingId] = useState<string | null>(null); // hangi mesaj şu an okunuyor
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [currentStep, setCurrentStep] = useState<string>('Sorunuz analiz ediliyor...');
+
   const soundRef = useRef<Audio.Sound | null>(null);
   const flatListRef = useRef<FlatList>(null);
-  const currentStep = useStreamingSteps(isLoading);
 
   useEffect(() => {
     const keyboardDidShowListener = Keyboard.addListener(
@@ -100,7 +100,6 @@ const Chat = () => {
     })();
   }, []);
 
-  // Component unmount olduğunda çalan sesi serbest bırak
   useEffect(() => {
     return () => {
       soundRef.current?.unloadAsync();
@@ -111,7 +110,6 @@ const Chat = () => {
   const speakText = async (messageId: string, text: string) => {
     if (!text || !text.trim()) return;
 
-    // Aynı mesaja tekrar basıldıysa: durdur
     if (speakingId === messageId) {
       await soundRef.current?.stopAsync();
       await soundRef.current?.unloadAsync();
@@ -120,7 +118,6 @@ const Chat = () => {
       return;
     }
 
-    // Başka bir mesaj okunuyorsa onu durdur
     if (soundRef.current) {
       await soundRef.current.stopAsync();
       await soundRef.current.unloadAsync();
@@ -155,54 +152,68 @@ const Chat = () => {
     }
   };
 
-const sendMessage = async () => {
-  const trimmedText = inputText.trim();
-  if (!trimmedText) return;
+  const sendMessage = async () => {
+    const trimmedText = inputText.trim();
+    if (!trimmedText) return;
 
-  setMessages((prev) => [...prev, {
-    id: `user-${Date.now()}`,
-    text: trimmedText,
-    sender: 'user',
-    timestamp: new Date(),
-  }]);
-  setInputText('');
-  setIsLoading(true);
+    setMessages((prev) => [...prev, {
+      id: `user-${Date.now()}`,
+      text: trimmedText,
+      sender: 'user',
+      timestamp: new Date(),
+    }]);
+    setInputText('');
+    
+    setIsLoading(true);
+    setCurrentStep('Sorunuz analiz ediliyor...');
 
-  const startTime = Date.now();
+    const startTime = Date.now();
 
-  // Önce POST ile soruyu gönder, sonra SSE'ye bağlan
-  try {
-    const es = new EventSource(`${API_URL}/query/sql/stream/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: trimmedText }),
-    });
+    try {
+      const es = new EventSource(`${API_URL}/query/sql/stream/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: trimmedText }),
+      });
 
-    es.addEventListener('message', (event) => {
-      try {
-        const data = JSON.parse(event.data ?? '{}');
+      es.addEventListener('message', (event) => {
+        try {
+          const data = JSON.parse(event.data ?? '{}');
 
-        if (data.done) {
-          const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-          setMessages((prev) => [...prev, {
-            id: `bot-${Date.now()}`,
-            text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`,
-            spokenText: data.answer,
-            sender: 'bot',
-            timestamp: new Date(),
-          }]);
-          setIsLoading(false);
-          es.close();
+          if (data.done) {
+            const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+            setMessages((prev) => [...prev, {
+              id: `bot-${Date.now()}`,
+              text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`,
+              spokenText: data.answer,
+              sender: 'bot',
+              timestamp: new Date(),
+            }]);
+            setIsLoading(false);
+            es.close();
+          } else if (data.step) {
+            // Sunucudan gelen anlık bildirimleri yakalıyoruz
+            setCurrentStep(data.step);
+          }
+        } catch (e) {
+          console.error('SSE parse hatası:', e);
         }
-        // data.step geldiğinde useStreamingSteps zaten isLoading=true ile çalışıyor
-        // İstersen: setCurrentStep(data.step) ile direkt backend adımını gösterebilirsin
-      } catch (e) {
-        console.error('SSE parse hatası:', e);
-      }
-    });
+      });
 
-    es.addEventListener('error', (error) => {
-      console.error('SSE bağlantı hatası:', error);
+      es.addEventListener('error', (error) => {
+        console.error('SSE bağlantı hatası:', error);
+        setMessages((prev) => [...prev, {
+          id: `error-${Date.now()}`,
+          text: 'Bağlantı hatası oluştu.',
+          sender: 'bot',
+          timestamp: new Date(),
+        }]);
+        setIsLoading(false);
+        es.close();
+      });
+
+    } catch (error) {
+      console.error(error);
       setMessages((prev) => [...prev, {
         id: `error-${Date.now()}`,
         text: 'Bağlantı hatası oluştu.',
@@ -210,20 +221,8 @@ const sendMessage = async () => {
         timestamp: new Date(),
       }]);
       setIsLoading(false);
-      es.close();
-    });
-
-  } catch (error) {
-    console.error(error);
-    setMessages((prev) => [...prev, {
-      id: `error-${Date.now()}`,
-      text: 'Bağlantı hatası oluştu.',
-      sender: 'bot',
-      timestamp: new Date(),
-    }]);
-    setIsLoading(false);
-  }
-};
+    }
+  };
 
   const startRecording = async () => {
     try {
@@ -253,88 +252,95 @@ const sendMessage = async () => {
     }
   };
 
-// Mevcut sendVoiceMessage fonksiyonunu bununla değiştir:
-const sendVoiceMessage = async (audioUri: string) => {
-  setIsLoading(true);
-  
-  // ÖNEMLİ: Süreyi ölçmek için başlangıç zamanını en başta alıyoruz
-  const startTime = Date.now(); 
+  const sendVoiceMessage = async (audioUri: string) => {
+    setIsLoading(true);
+    setCurrentStep('Ses dosyası yükleniyor...');
+    const startTime = Date.now(); 
 
-  try {
-    // --- 1. AŞAMA: SESİ YAZIYA ÇEVİR (TRANSCRIBE) ---
-    const formData = new FormData();
-    // Not: 'as any' kullanımı React Native'de FormData ve File objesi çelişkisini çözmek içindir
-    formData.append('audio', { 
-      uri: audioUri, 
-      type: 'audio/m4a', 
-      name: 'recording.m4a' 
-    } as any);
+    try {
+      const formData = new FormData();
+      formData.append('audio', { 
+        uri: audioUri, 
+        type: 'audio/m4a', 
+        name: 'recording.m4a' 
+      } as any);
 
-    const transcribeResponse = await fetch(`${API_URL}/transcribe`, {
-      method: 'POST',
-      body: formData,
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+      const transcribeResponse = await fetch(`${API_URL}/transcribe`, {
+        method: 'POST',
+        body: formData,
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
 
-    if (!transcribeResponse.ok) throw new Error('Ses tanıma hatası');
+      if (!transcribeResponse.ok) throw new Error('Ses tanıma hatası');
 
-    const transcribeData = await transcribeResponse.json();
-    const userText = transcribeData.transcription || transcribeData.text;
+      const transcribeData = await transcribeResponse.json();
+      const userText = transcribeData.transcription || transcribeData.text;
 
-    if (!userText) throw new Error('Ses anlaşılamadı');
+      if (!userText) throw new Error('Ses anlaşılamadı');
 
-    // 1.1: Kullanıcının söylediği metni ekrana bas
-    const userMessage: Message = {
-      id: `user-${Date.now()}`,
-      text: userText,
-      sender: 'user',
-      timestamp: new Date()
-    };
-    setMessages((prev) => [...prev, userMessage]);
+      setMessages((prev) => [...prev, {
+        id: `user-${Date.now()}`,
+        text: userText,
+        sender: 'user',
+        timestamp: new Date()
+      }]);
 
-    // --- 2. AŞAMA: METNİ CEVAPLAMASI İÇİN GÖNDER (QUERY) ---
-    const queryResponse = await fetch(`${API_URL}/query/sql/stream/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: userText }),
-    });
+      setCurrentStep('Sorunuz analiz ediliyor...');
 
-    if (!queryResponse.ok) throw new Error('Cevap alma hatası');
+      const es = new EventSource(`${API_URL}/query/sql/stream/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: userText }),
+      });
 
-    const queryData = await queryResponse.json();
-    
-    // Yanıt süresini hesapla
-    const endTime = Date.now();
-    const duration = ((endTime - startTime) / 1000).toFixed(1);
+      es.addEventListener('message', (event) => {
+        try {
+          const data = JSON.parse(event.data ?? '{}');
 
-    const botResponseRaw = queryData.answer || queryData.response || 'Yanıt yok.';
-    
-    // Metnin sonuna süreyi ekle
-    const finalBotText = `${botResponseRaw}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`;
+          if (data.done) {
+            const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+            setMessages((prev) => [...prev, {
+              id: `bot-${Date.now()}`,
+              text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`,
+              spokenText: data.answer,
+              sender: 'bot',
+              timestamp: new Date(),
+            }]);
+            setIsLoading(false);
+            es.close();
+          } else if (data.step) {
+            setCurrentStep(data.step);
+          }
+        } catch (e) {
+          console.error('SSE parse hatası:', e);
+        }
+      });
 
-    // 2.1: Botun cevabını ekrana bas
-    setMessages((prev) => [...prev, {
-      id: `bot-${Date.now()}`,
-      text: finalBotText,
-      spokenText: botResponseRaw,
-      sender: 'bot',
-      timestamp: new Date()
-    }]);
+      es.addEventListener('error', (error) => {
+        console.error('SSE bağlantı hatası:', error);
+        setMessages((prev) => [...prev, {
+          id: `error-${Date.now()}`,
+          text: 'Bağlantı hatası oluştu.',
+          sender: 'bot',
+          timestamp: new Date(),
+        }]);
+        setIsLoading(false);
+        es.close();
+      });
 
-  } catch (error) {
-    Alert.alert('Hata', 'İşlem sırasında bir sorun oluştu.');
-    console.error(error);
-    
-    setMessages((prev) => [...prev, {
-      id: `error-${Date.now()}`,
-      text: 'Üzgünüm, sizi anlayamadım veya bir bağlantı sorunu var.',
-      sender: 'bot',
-      timestamp: new Date(),
-    }]);
-  } finally {
-    setIsLoading(false);
-  }
-};
+    } catch (error) {
+      Alert.alert('Hata', 'İşlem sırasında bir sorun oluştu.');
+      console.error(error);
+      setMessages((prev) => [...prev, {
+        id: `error-${Date.now()}`,
+        text: 'Üzgünüm, sizi anlayamadım veya bir bağlantı sorunu var.',
+        sender: 'bot',
+        timestamp: new Date(),
+      }]);
+      setIsLoading(false);
+    }
+  };
+
   const scrollToBottom = () => {
     flatListRef.current?.scrollToEnd({ animated: true });
   };
@@ -357,7 +363,6 @@ const sendVoiceMessage = async (audioUri: string) => {
     return (
       <View style={styles.botMessageContainer}>
         <View style={styles.botAvatar}>
-            {/* İkonu 'sprout' (filiz) veya 'cow' olarak değiştirdik ve rengi yeşil yaptık */}
             <MaterialCommunityIcons name="cow" size={26} color="#2E7D32" />
         </View>
         <View style={styles.botContent}>
@@ -386,13 +391,11 @@ const sendVoiceMessage = async (audioUri: string) => {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#fff" />
 
-      {/* Header - Yeşil Tonlu Başlık */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
             <MaterialCommunityIcons name="cow" size={28} color="#2E7D32" style={{marginRight: 8}}/>
             <Text style={styles.headerTitle}>Süt Sihirbazı</Text>
         </View>
-
       </View>
 
       <FlatList
@@ -406,7 +409,6 @@ const sendVoiceMessage = async (audioUri: string) => {
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <View style={styles.emptyIconContainer}>
-                {/* Boş Ekranda Büyük İkon */}
                 <MaterialCommunityIcons name="barn" size={56} color="#388E3C" />
             </View>
             <Text style={styles.welcomeTitle}>Merhaba, Çiftçi Dostum!</Text>
@@ -431,7 +433,6 @@ const sendVoiceMessage = async (audioUri: string) => {
       >
         <View style={styles.inputWrapper}>
           <View style={styles.inputContainer}>
-
 
             <TextInput
               style={styles.input}
@@ -471,7 +472,6 @@ const sendVoiceMessage = async (audioUri: string) => {
 
 // --- STİLLER ---
 
-// Tema Renkleri
 const COLORS = {
   primary: '#1B5E20',
   primarySoft: '#2E7D32',
@@ -484,10 +484,9 @@ const COLORS = {
   textSecondary: '#546E7A',
   textMuted: '#8FA3AD',
 
-  // ✅ Eksik olanlar eklendi:
-  textBody: '#263238',       // markdownStyles'da kullanılıyor
-  textDark: '#1B5E20',       // thText, strong'da kullanılıyor
-  secondary: '#F1F8E9',      // th, micButton, emptyIconContainer'da kullanılıyor
+  textBody: '#263238',
+  textDark: '#1B5E20',
+  secondary: '#F1F8E9',
 
   userBubble: '#E0F2F1',
   botBubble: '#FFFFFF',
@@ -510,7 +509,6 @@ const markdownStyles = StyleSheet.create({
   strong: { fontWeight: '700', color: COLORS.textDark },
   paragraph: { marginTop: 0, marginBottom: 12, flexWrap: 'wrap' },
 
-  // Tablo stilleri (Çiftlik raporu tarzı)
   tableScrollView: { marginVertical: 12 },
   tableContent: { paddingRight: 10 },
   tableCard: {
@@ -525,7 +523,7 @@ const markdownStyles = StyleSheet.create({
   tr: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#F1F8E9' },
   th: {
     padding: 12,
-    backgroundColor: COLORS.secondary, // Başlıklar hafif yeşil
+    backgroundColor: COLORS.secondary,
     borderRightWidth: 1,
     borderColor: '#C5E1A5',
     width: 120,
@@ -569,7 +567,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 20,
     fontWeight: '700',
-    color: COLORS.primary, // Marka Rengi
+    color: COLORS.primary,
     letterSpacing: 0.5,
   },
   listContent: {
@@ -577,11 +575,9 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
     flexGrow: 1,
   },
-
-  // Mesajlar
   userMessageContainer: { alignSelf: 'flex-end', marginVertical: 12, maxWidth: '85%' },
   userBubble: {
-    backgroundColor: COLORS.userBubble, // Özgün renk
+    backgroundColor: COLORS.userBubble,
     borderRadius: 20,
     borderTopRightRadius: 4,
     paddingHorizontal: 18,
@@ -600,7 +596,6 @@ const styles = StyleSheet.create({
   loadingIcon: { marginRight: 8, opacity: 0.8 },
   loadingText: { color: '#689F38', fontSize: 14, fontStyle: 'italic' },
 
-  // Input Alanı
   inputWrapper: {
     backgroundColor: '#fff',
     borderTopWidth: 1,
@@ -612,7 +607,7 @@ const styles = StyleSheet.create({
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.inputBg, // Açık yeşilimsi gri
+    backgroundColor: COLORS.inputBg,
     borderRadius: 28,
     paddingHorizontal: 8,
     paddingVertical: 6,
@@ -624,7 +619,7 @@ const styles = StyleSheet.create({
   input: {
     flex: 1,
     fontSize: 16,
-    color: '#33691E', // Yazarken koyu yeşil font
+    color: '#33691E',
     marginHorizontal: 8,
     maxHeight: 120,
     minHeight: 40,
@@ -635,16 +630,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 21,
-    backgroundColor: COLORS.secondary, // Mikrofon pasifken açık yeşil zemin
+    backgroundColor: COLORS.secondary,
   },
   recordingActive: {
-      backgroundColor: COLORS.danger, // Kayıt sırasında kırmızı
+      backgroundColor: COLORS.danger,
       elevation: 4
   },
   sendButton: {
     width: 42,
     height: 42,
-    backgroundColor: COLORS.primary, // Gönder butonu ana yeşil
+    backgroundColor: COLORS.primary,
     borderRadius: 21,
     justifyContent: 'center',
     alignItems: 'center',
@@ -654,8 +649,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 3,
   },
-
-  // Empty State (Boş Ekran)
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -665,7 +658,7 @@ const styles = StyleSheet.create({
   emptyIconContainer: {
       marginBottom: 24,
       padding: 24,
-      backgroundColor: COLORS.secondary, // İkon arkası
+      backgroundColor: COLORS.secondary,
       borderRadius: 60,
       borderWidth: 1,
       borderColor: '#C5E1A5',
