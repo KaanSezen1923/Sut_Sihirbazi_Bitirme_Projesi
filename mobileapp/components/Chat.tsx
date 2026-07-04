@@ -15,11 +15,14 @@ import {
   Keyboard,
   ScrollView,
   StatusBar,
+  Modal,
 } from 'react-native';
 import Markdown, { RenderRules } from 'react-native-markdown-display';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { StepIndicator } from './StepIndicator';
+import Constants from 'expo-constants';
+import { isRunningInExpoGo } from 'expo';
 
 interface Message {
   id: string;
@@ -29,8 +32,32 @@ interface Message {
   timestamp: Date;
 }
 
-//const API_URL ='http://10.0.2.2:8000';
-const API_URL = 'http://localhost:8000';
+interface Alarm {
+  id: number;
+  kupe_no: string;
+  isim: string;
+  tarih: string;
+  sagim_zamani: string;
+  eski_ortalama: number;
+  son_verim: number;
+  dusus_yuzdesi: number;
+  mesaj: string;
+  okundu: boolean;
+  olusturulma_tarihi: string;
+}
+
+
+// Metro'nun çalıştığı host IP adresini otomatik olarak tespit edip API_URL'i yapılandırıyoruz
+const getApiUrl = () => {
+  const hostUri = Constants.expoConfig?.hostUri;
+  if (hostUri) {
+    const ip = hostUri.split(':')[0];
+    return `http://${ip}:8000`;
+  }
+  return 'http://localhost:8000';
+};
+
+const API_URL = getApiUrl();
 
 // --- MARKDOWN KURALLARI (Tablo Düzeni) ---
 const markdownRules: RenderRules = {
@@ -74,8 +101,137 @@ const Chat = () => {
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string>('Sorunuz analiz ediliyor...');
 
+  const [alarms, setAlarms] = useState<Alarm[]>([]);
+  const [isAlarmsVisible, setIsAlarmsVisible] = useState(false);
+  const [unreadAlarmsCount, setUnreadAlarmsCount] = useState(0);
+
   const soundRef = useRef<Audio.Sound | null>(null);
   const flatListRef = useRef<FlatList>(null);
+
+  // --- ALARMLARI YÜKLE ---
+  const fetchAlarms = async () => {
+    try {
+      const response = await fetch(`${API_URL}/alarms`);
+      if (!response.ok) throw new Error('Alarmlar alınamadı.');
+      const data = await response.json();
+      if (data.success && data.alarms) {
+        setAlarms(data.alarms);
+        const unread = data.alarms.filter((a: Alarm) => !a.okundu).length;
+        setUnreadAlarmsCount(unread);
+      }
+    } catch (err) {
+      console.error('Alarmlar yüklenirken hata:', err);
+    }
+  };
+
+  // --- ALARMI OKUNDU İŞARETLE ---
+  const markAlarmAsRead = async (alarmId: number) => {
+    try {
+      setAlarms((prevAlarms) =>
+        prevAlarms.map((alarm) =>
+          alarm.id === alarmId ? { ...alarm, okundu: true } : alarm
+        )
+      );
+      setUnreadAlarmsCount((prev) => Math.max(0, prev - 1));
+
+      const response = await fetch(`${API_URL}/alarms/${alarmId}/read`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error('Alarm okundu olarak işaretlenirken hata oluştu.');
+      }
+    } catch (err) {
+      console.error('Alarm okuma hatası:', err);
+      fetchAlarms();
+    }
+  };
+
+  // --- PUSH BİLDİRİM KAYDI ---
+  const registerForPushNotifications = async () => {
+    let token = '';
+
+    // Expo Go (SDK 53/54) içinde push bildirimi çökmeye neden olduğu için gerçek token alma kısmını pasif bırakıp test/mock token gönderiyoruz
+    if (isRunningInExpoGo() || Constants.executionEnvironment === 'store-client') {
+      console.log('Push bildirimleri Expo Go uygulamasında (SDK 53/54) desteklenmemektedir. Test/Mock token gönderiliyor.');
+      token = 'ExponentPushToken[MockTokenForExpoGo_LocalTest]';
+    } else {
+      try {
+        // expo-notifications'ı burada require ederek Expo Go'da yüklenmesini ve dolayısıyla çökmesini engelliyoruz
+        const Notifications = require('expo-notifications');
+
+        Notifications.setNotificationHandler({
+          handleNotification: async () => ({
+            shouldShowAlert: true,
+            shouldPlaySound: true,
+            shouldSetBadge: false,
+          }),
+        });
+
+        if (Platform.OS === 'android') {
+          await Notifications.setNotificationChannelAsync('default', {
+            name: 'default',
+            importance: Notifications.AndroidImportance.MAX,
+            vibrationPattern: [0, 250, 250, 250],
+            lightColor: '#FF231F7C',
+          });
+        }
+
+        const { status: existingStatus } = await Notifications.getPermissionsAsync();
+        let finalStatus = existingStatus;
+        if (existingStatus !== 'granted') {
+          const { status } = await Notifications.requestPermissionsAsync();
+          finalStatus = status;
+        }
+        if (finalStatus !== 'granted') {
+          console.log('Push bildirim izni reddedildi.');
+          return;
+        }
+
+        const projectId =
+          Constants.expoConfig?.extra?.eas?.projectId ??
+          Constants.easConfig?.projectId;
+
+        let tokenData;
+        try {
+          tokenData = await Notifications.getExponentPushTokenAsync({ projectId });
+        } catch (err) {
+          tokenData = await Notifications.getExponentPushTokenAsync();
+        }
+
+        token = tokenData.data;
+      } catch (error) {
+        console.error('Push bildirim kurulum hatası:', error);
+        return;
+      }
+    }
+
+    if (token) {
+      try {
+        console.log('Backend\'e kaydolan token:', token);
+        const response = await fetch(`${API_URL}/register-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
+        });
+
+        if (!response.ok) {
+          throw new Error('Token backend\'e kaydedilemedi.');
+        }
+        console.log('Push token başarıyla backend\'e kaydedildi.');
+      } catch (err) {
+        console.error('Backend token kayıt hatası:', err);
+      }
+    }
+  };
+
+  useEffect(() => {
+    registerForPushNotifications();
+    fetchAlarms();
+    
+    // Her 30 saniyede bir alarmları arka planda güncelleyelim
+    const interval = setInterval(fetchAlarms, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     const keyboardDidShowListener = Keyboard.addListener(
@@ -396,7 +552,112 @@ const Chat = () => {
             <MaterialCommunityIcons name="cow" size={28} color="#2E7D32" style={{marginRight: 8}}/>
             <Text style={styles.headerTitle}>Süt Sihirbazı</Text>
         </View>
+        <TouchableOpacity
+          style={styles.bellButton}
+          onPress={() => {
+            fetchAlarms();
+            setIsAlarmsVisible(true);
+          }}
+        >
+          <Ionicons name="notifications-outline" size={24} color={COLORS.primarySoft} />
+          {unreadAlarmsCount > 0 && (
+            <View style={styles.bellBadge}>
+              <Text style={styles.bellBadgeText}>
+                {unreadAlarmsCount > 9 ? '9+' : unreadAlarmsCount}
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
       </View>
+
+      {/* Alarm Çekmecesi (Modal) */}
+      <Modal
+        visible={isAlarmsVisible}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setIsAlarmsVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity 
+            style={styles.modalDismissArea} 
+            activeOpacity={1} 
+            onPress={() => setIsAlarmsVisible(false)} 
+          />
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderTitleRow}>
+                <Ionicons name="notifications" size={24} color={COLORS.danger} style={{ marginRight: 8 }} />
+                <Text style={styles.modalTitle}>Süt Verim Alarmları</Text>
+                {unreadAlarmsCount > 0 && (
+                  <View style={styles.modalBadge}>
+                    <Text style={styles.modalBadgeText}>{unreadAlarmsCount} Yeni</Text>
+                  </View>
+                )}
+              </View>
+              <TouchableOpacity onPress={() => setIsAlarmsVisible(false)} style={styles.modalCloseButton}>
+                <Ionicons name="close" size={24} color={COLORS.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <FlatList
+              data={alarms}
+              keyExtractor={(item) => item.id.toString()}
+              contentContainerStyle={styles.alarmListContent}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={[styles.alarmCard, !item.okundu && styles.unreadAlarmCard]}
+                  onPress={() => !item.okundu && markAlarmAsRead(item.id)}
+                  activeOpacity={0.8}
+                >
+                  <View style={styles.alarmCardHeader}>
+                    <View style={styles.cowInfoRow}>
+                      <MaterialCommunityIcons name="cow" size={20} color="#2E7D32" style={{ marginRight: 6 }} />
+                      <Text style={styles.cowNameText}>{item.isim}</Text>
+                      <Text style={styles.cowTagText}>({item.kupe_no})</Text>
+                    </View>
+                    {!item.okundu && <View style={styles.unreadIndicatorDot} />}
+                  </View>
+
+                  <View style={styles.dropBadgeRow}>
+                    <View style={styles.dropPercentBadge}>
+                      <Ionicons name="trending-down" size={14} color="#fff" style={{ marginRight: 4 }} />
+                      <Text style={styles.dropPercentText}>Süt Düşüşü: %{item.dusus_yuzdesi}</Text>
+                    </View>
+                    <Text style={styles.milkingTimeText}>
+                      {item.tarih} - {item.sagim_zamani === 'm' ? 'Sabah Sağımı' : 'Akşam Sağımı'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.milkValuesRow}>
+                    <Text style={styles.milkValueLabel}>
+                      Son Verim: <Text style={styles.milkValueText}>{item.son_verim} L</Text>
+                    </Text>
+                    <View style={styles.valueSeparator} />
+                    <Text style={styles.milkValueLabel}>
+                      Eski Ortalama: <Text style={styles.milkValueText}>{item.eski_ortalama} L</Text>
+                    </Text>
+                  </View>
+
+                  <Text style={styles.alarmMessageText}>{item.mesaj}</Text>
+                </TouchableOpacity>
+              )}
+              ListEmptyComponent={
+                <View style={styles.emptyAlarmsContainer}>
+                  <Ionicons name="checkmark-circle-outline" size={48} color="#2E7D32" style={{ marginBottom: 12 }} />
+                  <Text style={styles.emptyAlarmsTitle}>Her Şey Yolunda!</Text>
+                  {/* 
+                    NOT: expo-notifications paketi Expo Go uygulamasında desteklenmediği için çökme yaşanmaması adına 
+                    registerForPushNotifications fonksiyonu içerisinde dinamik ve koşullu (await import) olarak yüklenmektedir.
+                  */}
+                  <Text style={styles.emptyAlarmsSubtitle}>
+                    %20 veya daha fazla süt düşüşü yaşayan riskli inek bulunamadı.
+                  </Text>
+                </View>
+              }
+            />
+          </View>
+        </View>
+      </Modal>
 
       <FlatList
         ref={flatListRef}
@@ -675,6 +936,198 @@ const styles = StyleSheet.create({
       textAlign: 'center',
       paddingHorizontal: 40,
       lineHeight: 24
+  },
+  bellButton: {
+    padding: 8,
+    position: 'relative',
+  },
+  bellBadge: {
+    position: 'absolute',
+    right: 4,
+    top: 4,
+    backgroundColor: '#D32F2F',
+    borderRadius: 8,
+    width: 16,
+    height: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  bellBadgeText: {
+    color: '#fff',
+    fontSize: 9,
+    fontWeight: 'bold',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    justifyContent: 'flex-end',
+  },
+  modalDismissArea: {
+    flex: 1,
+  },
+  modalContent: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '75%',
+    minHeight: '40%',
+    paddingBottom: Platform.OS === 'ios' ? 24 : 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 10,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F8E9',
+  },
+  modalHeaderTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#263238',
+  },
+  modalBadge: {
+    backgroundColor: '#FFEBEE',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  modalBadgeText: {
+    color: '#C62828',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  modalCloseButton: {
+    padding: 4,
+  },
+  alarmListContent: {
+    padding: 16,
+  },
+  alarmCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  unreadAlarmCard: {
+    backgroundColor: '#FFF8F8',
+    borderColor: '#FFCDD2',
+  },
+  alarmCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  cowInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  cowNameText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#263238',
+  },
+  cowTagText: {
+    fontSize: 14,
+    color: '#78909C',
+    marginLeft: 4,
+  },
+  unreadIndicatorDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#D32F2F',
+  },
+  dropBadgeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    flexWrap: 'wrap',
+  },
+  dropPercentBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#D32F2F',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  dropPercentText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  milkingTimeText: {
+    fontSize: 12,
+    color: '#78909C',
+  },
+  milkValuesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F5F5F5',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  milkValueLabel: {
+    fontSize: 12,
+    color: '#546E7A',
+  },
+  milkValueText: {
+    fontWeight: 'bold',
+    color: '#263238',
+  },
+  valueSeparator: {
+    width: 1,
+    height: 12,
+    backgroundColor: '#B0BEC5',
+    marginHorizontal: 12,
+  },
+  alarmMessageText: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#37474F',
+    fontStyle: 'italic',
+  },
+  emptyAlarmsContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+  emptyAlarmsTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#2E7D32',
+    marginTop: 12,
+    marginBottom: 6,
+  },
+  emptyAlarmsSubtitle: {
+    fontSize: 14,
+    color: '#546E7A',
+    textAlign: 'center',
+    lineHeight: 20,
   },
 });
 

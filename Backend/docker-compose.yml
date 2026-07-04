@@ -7,10 +7,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Çiftlik verisinin container dışında da güncellenebilmesi için canlı bağlıyoruz
-      - ./data.csv:/app/data.csv
+      # Tüm Backend klasörünü container'a bağlıyoruz (hot-reload için)
+      - .:/app
       # 1.5 GB'lık Whisper modelinin her restartta sıfırdan indirilmesini önleyen volume
       - whisper_model_cache:/root/.cache/whisper
+    entrypoint: ["sh", "-c", "sed -i 's/\\r$$//' /app/start.sh && chmod +x /app/start.sh && /app/start.sh"]
     environment:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}

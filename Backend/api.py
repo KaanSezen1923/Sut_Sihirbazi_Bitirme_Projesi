@@ -25,8 +25,25 @@ except Exception as e:
     print(f"Piper TTS modeli yüklenirken hata oluştu: {e}")
     voice = None
 
-# FastAPI objesini lifespan ile başlatıyoruz
-app = FastAPI()
+# Lifespan ile uygulama başlangıcında scheduler'ı tetikliyoruz
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Uygulama başladığında scheduler'ı başlat
+    try:
+        from alarms import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        print(f"Zamanlayıcı başlatılamadı: {e}")
+    yield
+    # Uygulama kapandığında scheduler'ı durdur
+    try:
+        from alarms import scheduler
+        if scheduler.running:
+            scheduler.shutdown()
+    except Exception as e:
+        print(f"Zamanlayıcı durdurulamadı: {e}")
+
+app = FastAPI(lifespan=lifespan)
 
 # --- 2. Pydantic Modelleri ---
 class QueryRequest(BaseModel):
@@ -50,6 +67,9 @@ class TranscriptionResponse(BaseModel):
 
 class TtsRequest(BaseModel):
     text: str
+
+class PushTokenRequest(BaseModel):
+    token: str
 
 # --- 3. Yardımcı Fonksiyonlar ---
 def sse_event(data: dict) -> str:
@@ -238,6 +258,113 @@ async def text_to_speech(text: str, background_tasks: BackgroundTasks):
     except Exception as e:
         print(f"TTS Hata Detayı: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Sentezleme hatası: {str(e)}")
+
+# === ALARM & AJANDA ENDPOINTLERİ ===
+@app.post("/register-token")
+def register_push_token(request: PushTokenRequest):
+    token = request.token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Token boş olamaz.")
+    
+    from alarms import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO cihaz_tokenlari (token) VALUES (%s) ON CONFLICT (token) DO NOTHING;",
+            (token,)
+        )
+        conn.commit()
+        cursor.close()
+        return {"success": True, "message": "Push token başarıyla kaydedildi."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Veritabanı kayıt hatası: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/alarms/check")
+def trigger_alarm_check():
+    from alarms import check_for_milk_drops
+    try:
+        new_alarms = check_for_milk_drops()
+        return {
+            "success": True, 
+            "message": f"Süt düşüş analizi tamamlandı. {new_alarms} yeni alarm tespit edildi."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analiz sırasında hata oluştu: {e}")
+
+@app.get("/alarms")
+def get_alarms(unread_only: bool = False):
+    from alarms import get_db_connection
+    from psycopg2.extras import RealDictCursor
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if unread_only:
+            cursor.execute(
+                """
+                SELECT a.id, a.kupe_no, i.isim, a.tarih, a.sagim_zamani, a.eski_ortalama, a.son_verim, a.dusus_yuzdesi, a.mesaj, a.okundu, a.olusturulma_tarihi
+                FROM alarmlar a
+                JOIN inekler i ON a.kupe_no = i.kupe_no
+                WHERE a.okundu = FALSE
+                ORDER BY a.tarih DESC, a.id DESC;
+                """
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT a.id, a.kupe_no, i.isim, a.tarih, a.sagim_zamani, a.eski_ortalama, a.son_verim, a.dusus_yuzdesi, a.mesaj, a.okundu, a.olusturulma_tarihi
+                FROM alarmlar a
+                JOIN inekler i ON a.kupe_no = i.kupe_no
+                ORDER BY a.tarih DESC, a.id DESC;
+                """
+            )
+            
+        alarms = cursor.fetchall()
+        cursor.close()
+        
+        for alarm in alarms:
+            alarm["tarih"] = str(alarm["tarih"])
+            alarm["olusturulma_tarihi"] = str(alarm["olusturulma_tarihi"])
+            alarm["eski_ortalama"] = float(alarm["eski_ortalama"])
+            alarm["son_verim"] = float(alarm["son_verim"])
+            alarm["dusus_yuzdesi"] = float(alarm["dusus_yuzdesi"])
+            
+        return {"success": True, "alarms": alarms}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Alarmlar listelenirken hata oluştu: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/alarms/{alarm_id}/read")
+def mark_alarm_as_read(alarm_id: int):
+    from alarms import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE alarmlar SET okundu = TRUE WHERE id = %s;", (alarm_id,))
+        rows_affected = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        
+        if rows_affected == 0:
+            raise HTTPException(status_code=404, detail="Alarm bulunamadı.")
+            
+        return {"success": True, "message": "Alarm okundu olarak işaretlendi."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Güncelleme hatası: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
