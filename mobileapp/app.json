@@ -12,7 +12,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.sutsihirbazi.app",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Süt Sihirbazı'nın sesli komutlarınızı duyması için mikrofona ihtiyacı var."
+        "NSMicrophoneUsageDescription": "Süt Sihirbazı'nın sesli komutlarınızı duyması için mikrofona ihtiyacı var.",
+        "NSSpeechRecognitionUsageDescription": "Allow $(PRODUCT_NAME) to use speech recognition."
       }
     },
     "android": {
@@ -26,6 +27,8 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.INTERNET",
         "android.permission.RECORD_AUDIO",
         "android.permission.INTERNET"
       ]
@@ -60,6 +63,19 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "0988cbaf-7c8d-4ceb-bbb7-1ed3b6d7793b"
+      }
+    },
+    "owner": "kaan1923",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/0988cbaf-7c8d-4ceb-bbb7-1ed3b6d7793b"
     }
   }
 }

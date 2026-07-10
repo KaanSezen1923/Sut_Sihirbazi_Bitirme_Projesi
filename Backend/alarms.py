@@ -7,7 +7,7 @@ from exponent_server_sdk import PushClient, PushMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-# Yalnızca bu modül tek başına çalıştırıldığında dotenv yüklensin
+
 load_dotenv()
 
 # LLM'i langchain_ollama veya sql_rag'den yükleyelim
@@ -16,17 +16,16 @@ try:
 except ImportError:
     from langchain_ollama import ChatOllama
     local_llm = ChatOllama(
-        model=os.getenv("LOCAL_LLM", "gemma3:4b"),
+        model=os.getenv("LOCAL_LLM"),
         temperature=0.1,
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        base_url=os.getenv("OLLAMA_BASE_URL")
     )
 
 def get_db_connection():
-    db_user = os.getenv("DB_USER", "postgres")
-    db_password = os.getenv("DB_PASSWORD", "kaan1923")
-    # API docker içinde çalışıyorsa 'host.docker.internal' kullanır, dışarıda ise (örneğin test sırasında) 'localhost'
-    db_host = os.getenv("DB_HOST", "host.docker.internal")
-    db_name = os.getenv("DB_NAME", "Sut_Sihirbazi_Real")
+    db_user = os.getenv("DB_USER")
+    db_password = os.getenv("DB_PASSWORD")
+    db_host = os.getenv("DB_HOST")
+    db_name = os.getenv("DB_NAME")
     
     return psycopg2.connect(
         dbname=db_name,
@@ -86,12 +85,10 @@ def check_for_milk_drops():
     conn = None
     try:
         conn = get_db_connection()
-        # Verileri sözlük formatında çekmek için RealDictCursor kullanıyoruz
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         query = """
         WITH son_kayitlar AS (
-            -- Her inek için son sağım kaydı
             SELECT DISTINCT ON (kupe_no)
                 id,
                 kupe_no,
@@ -102,7 +99,6 @@ def check_for_milk_drops():
             ORDER BY kupe_no, tarih DESC, id DESC
         ),
         gecmis_ortalamalar AS (
-            -- Her inek için, son sağım kaydından önce gelen ve aynı sağım zamanına ('m' veya 'e') sahip son 3 kaydın ortalaması
             SELECT
                 sk.kupe_no,
                 AVG(sk_eski.sut_miktari) AS ortalama_sut
@@ -130,7 +126,7 @@ def check_for_milk_drops():
         JOIN gecmis_ortalamalar go ON sk.kupe_no = go.kupe_no
         JOIN inekler i ON sk.kupe_no = i.kupe_no
         WHERE go.ortalama_sut > 0
-          AND sk.sut_miktari < go.ortalama_sut * 0.8; -- %20 veya daha fazla düşüş
+          AND sk.sut_miktari < go.ortalama_sut * 0.8; 
         """
         
         cursor.execute(query)
@@ -143,7 +139,6 @@ def check_for_milk_drops():
             tarih = anomaly["tarih"]
             sagim_zamani = anomaly["sagim_zamani"]
             
-            # Bu kayıt için zaten bir alarm üretilmiş mi kontrol et
             cursor.execute(
                 "SELECT id FROM alarmlar WHERE kupe_no = %s AND tarih = %s AND sagim_zamani = %s;",
                 (kupe_no, tarih, sagim_zamani)
@@ -159,7 +154,6 @@ def check_for_milk_drops():
                 
                 print(f"[{kupe_no}] - {isim} için anomali tespit edildi. LLM'den mesaj üretiliyor...")
 
-                # LLM Mesajı Üretimi
                 prompt_template = """
                 Sen, çiftçilere yardım eden neşeli ve akıllı yapay zeka asistanı **Süt Sihirbazı**'sın.
                 Aşağıdaki bilgilere dayanarak, ineğin süt verimindeki düşüş hakkında çiftçiye samimi, açıklayıcı ve yapıcı bir dille kısa ve net bir uyarı/alarm mesajı yaz. Çiftçiyi paniğe sevk etme, ancak meme sağlığı (mastitis vb.), stres veya yem kontrolü yapmasını tavsiye et.
@@ -193,7 +187,6 @@ def check_for_milk_drops():
                     print(f"LLM mesaj üretme hatası: {llm_err}")
                     mesaj = f"Dikkat! {isim} ({kupe_no}) isimli ineğinizin {tarih} tarihindeki {sagim_zamani_tr} sağım verimi %{dusus_yuzdesi:.1f} düşmüştür. Son verim: {son_verim} L, Eski Ortalama: {eski_ortalama:.1f} L."
 
-                # Alarmlar tablosuna ekle
                 cursor.execute(
                     """
                     INSERT INTO alarmlar (kupe_no, tarih, sagim_zamani, eski_ortalama, son_verim, dusus_yuzdesi, mesaj)
@@ -205,11 +198,9 @@ def check_for_milk_drops():
                 
                 print(f"[{kupe_no}] - Alarm başarıyla oluşturuldu ve veritabanına eklendi.")
 
-                # Push Bildirimi Gönder
                 title = f"🚨 {isim} İçin Süt Alarmı!"
                 send_push_notification(title, mesaj)
             else:
-                # Eğer alarm zaten varsa bunu ekranda belirtelim ki kafa karışıklığı olmasın
                 print(f"[{kupe_no}] - {tarih} ({sagim_zamani}) zamanlı alarm zaten veritabanında mevcut, atlandı.")
         
         if new_alarms_count > 0:
@@ -227,21 +218,124 @@ def check_for_milk_drops():
         if conn:
             conn.close()
 
-# Arka Plan Görev Zamanlayıcısı
-scheduler = BackgroundScheduler()
+def generate_daily_summary():
+    """
+    Günlük toplam süt üretimini dünün üretimiyle kıyaslar, günün en verimli ineğini tespit eder,
+    bu özeti veritabanındaki 'gunluk_ozetler' tablosuna kaydeder ve çiftçiye push bildirimi gönderir.
+    """
+    print("Günlük çiftlik özeti üretiliyor...")
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. En son sağım yapılan tarihi bul
+        cursor.execute("SELECT MAX(tarih) FROM sagim_kayitlari;")
+        latest_date_row = cursor.fetchone()
+        if not latest_date_row or not latest_date_row[0]:
+            print("Veritabanında sağım kaydı bulunamadı.")
+            return None
+        today_date = latest_date_row[0]
+        
+        # 2. Dünün tarihini bul
+        cursor.execute("SELECT DISTINCT tarih FROM sagim_kayitlari WHERE tarih < %s ORDER BY tarih DESC LIMIT 1;", (today_date,))
+        yesterday_date_row = cursor.fetchone()
+        yesterday_date = yesterday_date_row[0] if yesterday_date_row else None
+        
+        # 3. Bugünün toplam süt üretimini hesapla
+        cursor.execute("SELECT SUM(sut_miktari) FROM sagim_kayitlari WHERE tarih = %s;", (today_date,))
+        today_total_row = cursor.fetchone()
+        today_total = float(today_total_row[0]) if today_total_row and today_total_row[0] is not None else 0.0
+        
+        # 4. Dünün toplam süt üretimini hesapla
+        yesterday_total = 0.0
+        if yesterday_date:
+            cursor.execute("SELECT SUM(sut_miktari) FROM sagim_kayitlari WHERE tarih = %s;", (yesterday_date,))
+            yesterday_total_row = cursor.fetchone()
+            yesterday_total = float(yesterday_total_row[0]) if yesterday_total_row and yesterday_total_row[0] is not None else 0.0
+            
+        # 5. Değişim miktarını belirle
+        diff = today_total - yesterday_total
+        diff_str = f"+{diff:.1f}" if diff >= 0 else f"{diff:.1f}"
+        
+        # 6. Günün en verimli ineğini bul
+        cursor.execute("""
+            SELECT i.isim, sk.kupe_no, SUM(sk.sut_miktari) as toplam_sut
+            FROM sagim_kayitlari sk
+            JOIN inekler i ON sk.kupe_no = i.kupe_no
+            WHERE sk.tarih = %s
+            GROUP BY i.isim, sk.kupe_no
+            ORDER BY toplam_sut DESC
+            LIMIT 1;
+        """, (today_date,))
+        top_cow_row = cursor.fetchone()
+        
+        top_cow_name = "Bilinmeyen İnek"
+        top_cow_tag = None
+        top_cow_milk = 0.0
+        if top_cow_row:
+            top_cow_name = top_cow_row[0]
+            top_cow_tag = top_cow_row[1]
+            top_cow_milk = float(top_cow_row[2])
+            
+        print(f"Bugün ({today_date}): {today_total} L. Dün ({yesterday_date}): {yesterday_total} L. En verimli: {top_cow_name} ({top_cow_milk} L).")
+        
+        # LLM Mesajı Üretimi (Basit Prompt)
+        mesaj = f"""
+        Çiftçiye özel günlük özet:
+        Bugün({today_date}): {today_total:.1f} L
+        Dün({yesterday_date}): {yesterday_total:.1f} L
+        Değişim: {diff_str} L
+        En verimli: {top_cow_name} ({top_cow_tag}) - {top_cow_milk:.1f} L
+        """.strip()
+
+        # Bu tarih için zaten bir özet kaydı oluşturulmuş mu kontrol et
+        cursor.execute(
+            "SELECT id FROM gunluk_ozetler WHERE tarih = %s;",
+            (today_date,)
+        )
+        exists = cursor.fetchone()
+        
+        if not exists:
+            # Özet kaydını yeni gunluk_ozetler tablosuna ekle
+            cursor.execute(
+                """
+                INSERT INTO gunluk_ozetler (tarih, dunku_toplam_sut, bugunku_toplam_sut, en_verimli_inek_kupe_no, mesaj)
+                VALUES (%s, %s, %s, %s, %s);
+                """,
+                (today_date, yesterday_total, today_total, top_cow_tag, mesaj)
+            )
+            conn.commit()
+            print(f"[{today_date}] - Günlük özet 'gunluk_ozetler' tablosuna başarıyla kaydedildi.")
+        else:
+            print(f"[{today_date}] - Günlük özet zaten veritabanında mevcut, tekrar kaydedilmedi.")
+
+        # Bildirimi gönder
+        title = "🥛 Günlük Çiftlik Özeti"
+        send_push_notification(title, mesaj)
+        
+        return mesaj
+    except Exception as e:
+        print(f"Günlük özet üretme hatası: {e}")
+        if conn:
+            conn.rollback()
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+from zoneinfo import ZoneInfo
+scheduler = BackgroundScheduler(timezone=ZoneInfo("Europe/Istanbul"))
 
 def start_scheduler():
-    """Arka planda süt düşüş analizini düzenli çalıştırır."""
     if not scheduler.running:
-        # Her gün sabah 08:00'de otomatik çalışacak şekilde zamanlıyoruz
-        scheduler.add_job(check_for_milk_drops, 'cron', hour=8, minute=0, id='milk_drop_checker')
+        scheduler.add_job(check_for_milk_drops, 'cron', hour=12, minute=0, id='milk_drop_checker_noon', name='Süt Düşüş Analizi (Öğle 12:00)')
+        scheduler.add_job(check_for_milk_drops, 'cron', hour=21, minute=0, id='milk_drop_checker_evening', name='Süt Düşüş Analizi (Akşam 21:00)')
+        scheduler.add_job(generate_daily_summary, 'cron', hour=21, minute=0, id='daily_summary_sender', name='Günlük Çiftlik Özeti (21:00)')
         scheduler.start()
-        print("Zamanlanmış görev motoru (Scheduler) başlatıldı. Süt düşüş analizi her gün 08:00'de çalışacak.")
+        print("Zamanlanmış görev motoru (Scheduler) başlatıldı.")
 
 if __name__ == "__main__":
-    # Test amaçlı doğrudan çalıştırıldığında analizi BİR KEZ tetikle
-    os.environ["DB_HOST"] = "localhost" # Dışarıdan çalıştırmak için localhost'a çekelim
-    
-    # DÜZELTİLEN KISIM: Fonksiyon artık iki kez üst üste çağrılmıyor.
+    os.environ["DB_HOST"] = "localhost" 
     new_alarms_count = check_for_milk_drops()
     print(f"Yeni alarm sayısı: {new_alarms_count}")

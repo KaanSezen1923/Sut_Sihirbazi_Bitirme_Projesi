@@ -13,6 +13,8 @@ services:
       - whisper_model_cache:/root/.cache/whisper
     entrypoint: ["sh", "-c", "sed -i 's/\\r$$//' /app/start.sh && chmod +x /app/start.sh && /app/start.sh"]
     environment:
+      - TZ=Europe/Istanbul
+      - PYTHONUNBUFFERED=1
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_HOST=${DB_HOST}

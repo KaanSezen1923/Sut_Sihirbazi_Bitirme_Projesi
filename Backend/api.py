@@ -14,28 +14,24 @@ import asyncio
 import wave
 from groq import Groq
 from piper import PiperVoice
+from data import sagim_verisi_uret_ve_kaydet
 
 client = Groq(api_key=os.environ.get("WHISPER_API_KEY"))
 
-# --- 1. Modelleri Yükleme ---
-# Piper TTS modelini global olarak yüklüyoruz (Her istekte tekrar yüklememek için)
 try:
     voice = PiperVoice.load("tr_TR-dfki-medium.onnx")
 except Exception as e:
     print(f"Piper TTS modeli yüklenirken hata oluştu: {e}")
     voice = None
 
-# Lifespan ile uygulama başlangıcında scheduler'ı tetikliyoruz
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Uygulama başladığında scheduler'ı başlat
     try:
         from alarms import start_scheduler
         start_scheduler()
     except Exception as e:
         print(f"Zamanlayıcı başlatılamadı: {e}")
     yield
-    # Uygulama kapandığında scheduler'ı durdur
     try:
         from alarms import scheduler
         if scheduler.running:
@@ -45,7 +41,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- 2. Pydantic Modelleri ---
 class QueryRequest(BaseModel):
     question: str
 
@@ -71,16 +66,13 @@ class TtsRequest(BaseModel):
 class PushTokenRequest(BaseModel):
     token: str
 
-# --- 3. Yardımcı Fonksiyonlar ---
 def sse_event(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 def remove_file(path: str):
-    """Arka planda geçici dosyaları silmek için yardımcı fonksiyon"""
     if os.path.exists(path):
         os.remove(path)
 
-# --- 4. Endpointler ---
 @app.get("/")
 def read_root():
     return {"message": "Süt Sihirbazı API Çalışıyor"}
@@ -92,13 +84,10 @@ async def sql_query_stream(question: str) -> AsyncGenerator[str, None]:
     final_state = {"question": question}
     
     try:
-        # LangGraph'ın astream özelliğini kullanarak düğüm (node) geçişlerini gerçek zamanlı dinliyoruz
         async for output in rag_app.astream({"question": question}, stream_mode="updates"):
             for node_name, state_update in output.items():
-                # Her adımda ana state'i güncelliyoruz
                 final_state.update(state_update)
                 
-                # Hangi düğümün çalıştığına göre dinamik SSE mesajı gönderiyoruz
                 if node_name == "classify":
                     if state_update.get("classification") == "sql":
                         yield sse_event({"step": "Veritabanı için SQL sorgusu oluşturuluyor...", "done": False})
@@ -114,7 +103,6 @@ async def sql_query_stream(question: str) -> AsyncGenerator[str, None]:
         yield sse_event({"step": "Bir hata oluştu...", "done": True, "answer": "Üzgünüm, işleminizi gerçekleştirirken bir hata oluştu."})
         return
 
-    # Akış bittiğinde son durumu (done: True) ve cevapları gönder
     yield sse_event({
         "done": True,
         "answer": final_state.get("answer", "Yanıt oluşturulamadı."),
@@ -209,7 +197,6 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             temp_file.write(content)
             temp_file_path = temp_file.name
 
-        # Groq API'sine Whisper isteği gönder
         with open(temp_file_path, "rb") as audio_file:
             transcription = client.audio.transcriptions.create(
                 model="whisper-large-v3", 
@@ -223,7 +210,6 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         print(f"Hata Detayı: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Transkripsiyon hatası: {str(e)}")
     finally:
-        # Geçici dosyayı temizle
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
@@ -236,19 +222,15 @@ async def text_to_speech(text: str, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Metin boş olamaz.")
 
     try:
-        # Ses dosyasını kaydetmek için geçici bir dosya oluşturuyoruz
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         temp_file_path = temp_file.name
-        temp_file.close() # Piper'ın dosyaya yazabilmesi için kapatıyoruz
+        temp_file.close() 
 
-        # Metni sese çevir
         with wave.open(temp_file_path, "wb") as wav_file:
             voice.synthesize_wav(text, wav_file)
 
-        # Dosya gönderildikten sonra sunucudan silinmesi için arka plan görevi ekle
         background_tasks.add_task(remove_file, temp_file_path)
 
-        # Ses dosyasını kullanıcıya döndür
         return FileResponse(
             path=temp_file_path,
             media_type="audio/wav",
@@ -296,6 +278,25 @@ def trigger_alarm_check():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analiz sırasında hata oluştu: {e}")
 
+@app.post("/alarms/daily-summary")
+def trigger_daily_summary():
+    from alarms import generate_daily_summary
+    try:
+        summary_msg = generate_daily_summary()
+        if summary_msg:
+            return {
+                "success": True,
+                "message": "Günlük özet başarıyla üretildi ve push bildirimi gönderildi.",
+                "summary": summary_msg
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Günlük özet üretilemedi. Kayıt bulunamamış olabilir."
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Özet üretilirken hata oluştu: {e}")
+
 @app.get("/alarms")
 def get_alarms(unread_only: bool = False):
     from alarms import get_db_connection
@@ -310,7 +311,7 @@ def get_alarms(unread_only: bool = False):
                 """
                 SELECT a.id, a.kupe_no, i.isim, a.tarih, a.sagim_zamani, a.eski_ortalama, a.son_verim, a.dusus_yuzdesi, a.mesaj, a.okundu, a.olusturulma_tarihi
                 FROM alarmlar a
-                JOIN inekler i ON a.kupe_no = i.kupe_no
+                LEFT JOIN inekler i ON a.kupe_no = i.kupe_no
                 WHERE a.okundu = FALSE
                 ORDER BY a.tarih DESC, a.id DESC;
                 """
@@ -320,7 +321,7 @@ def get_alarms(unread_only: bool = False):
                 """
                 SELECT a.id, a.kupe_no, i.isim, a.tarih, a.sagim_zamani, a.eski_ortalama, a.son_verim, a.dusus_yuzdesi, a.mesaj, a.okundu, a.olusturulma_tarihi
                 FROM alarmlar a
-                JOIN inekler i ON a.kupe_no = i.kupe_no
+                LEFT JOIN inekler i ON a.kupe_no = i.kupe_no
                 ORDER BY a.tarih DESC, a.id DESC;
                 """
             )
@@ -338,6 +339,43 @@ def get_alarms(unread_only: bool = False):
         return {"success": True, "alarms": alarms}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Alarmlar listelenirken hata oluştu: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+# YENİ ENDPOINT: Sadece Günlük Özetleri Getirir
+@app.get("/summaries")
+def get_summaries():
+    from alarms import get_db_connection
+    from psycopg2.extras import RealDictCursor
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute(
+            """
+            SELECT s.id, s.tarih, s.dunku_toplam_sut, s.bugunku_toplam_sut, 
+                   s.en_verimli_inek_kupe_no, i.isim as en_verimli_inek_isim, 
+                   s.mesaj, s.olusturulma_tarihi
+            FROM gunluk_ozetler s
+            LEFT JOIN inekler i ON s.en_verimli_inek_kupe_no = i.kupe_no
+            ORDER BY s.tarih DESC;
+            """
+        )
+        
+        summaries = cursor.fetchall()
+        cursor.close()
+        
+        for summary in summaries:
+            summary["tarih"] = str(summary["tarih"])
+            summary["olusturulma_tarihi"] = str(summary["olusturulma_tarihi"])
+            summary["dunku_toplam_sut"] = float(summary["dunku_toplam_sut"]) if summary["dunku_toplam_sut"] is not None else 0.0
+            summary["bugunku_toplam_sut"] = float(summary["bugunku_toplam_sut"]) if summary["bugunku_toplam_sut"] is not None else 0.0
+            
+        return {"success": True, "summaries": summaries}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Özetler listelenirken hata oluştu: {e}")
     finally:
         if conn:
             conn.close()
@@ -365,6 +403,25 @@ def mark_alarm_as_read(alarm_id: int):
     finally:
         if conn:
             conn.close()
+
+@app.post("/simule-data/sabah")
+def simule_data_sabah():
+    try:
+        sagim_verisi_uret_ve_kaydet("m")
+        return {"success": True, "message": "Sabah verileri başarıyla üretildi."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
+
+@app.post("/simule-data/aksam")
+def simule_data_aksam():
+    try:
+        sagim_verisi_uret_ve_kaydet("e")
+        return {"success": True, "message": "Akşam verileri başarıyla üretildi."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
+
+
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
