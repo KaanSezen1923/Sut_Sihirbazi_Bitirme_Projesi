@@ -102,19 +102,16 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
 
     yeni_kayitlar = []
 
+    # 1. ADIM: Tüm ineklerin verisi burada üretilir ve listeye eklenir
     for idx, kupe in enumerate(kupeler):
-        # 1. İneğin 2025'teki kendi karakteristiğini (mean ve std) al
         if kupe in istatistikler and sagim_zamani in istatistikler[kupe]:
             mean, std = istatistikler[kupe][sagim_zamani]
         else:
-            # İstatistiği yoksa makul bir varsayılan (fallback) değer
             mean = np.random.uniform(13.0, 16.0) if sagim_zamani == 'm' else np.random.uniform(10.5, 13.5)
             std = 1.2
 
-        # 2. İneğin kendi karakteristiğine (geçmiş verisine) sadık kalarak normal dağılımdan üret
         sut = np.random.normal(mean, std)
 
-        # 3. Anomali Enjeksiyonu
         if random.random() < ANOMALI_OLASILIGI:
             dusus_orani = np.random.uniform(0.35, 0.65)
             sut = sut * (1 - dusus_orani)
@@ -129,15 +126,24 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
             "sagim_zamani": sagim_zamani,
             "sut_miktari": sut,
         })
+    # --- FOR DÖNGÜSÜ BURADA BİTTİ ---
 
+    # 2. ADIM: Döngü bittikten sonra (4 boşluk geriye alındı) toplu kaydetme yapılır
     df_yeni = pd.DataFrame(yeni_kayitlar)
-    df_yeni.to_sql(
-        name="sagim_kayitlari",
-        con=engine,
-        if_exists="append",
-        index=False,
-        chunksize=100,
-    )
+        
+    try:
+        with engine.begin() as conn:
+            df_yeni.to_sql(
+                name="sagim_kayitlari",
+                con=conn,
+                if_exists="append",
+                index=False,
+                chunksize=100,
+            )
+        logging.info(f"[BAŞARILI] {len(df_yeni)} adet {sagim_adi} sağım kaydı veritabanına işlendi.")
+    except Exception as e:
+        logging.error(f"[HATA] {sagim_adi} sağım verileri veritabanına kaydedilirken hata oluştu: {e}")
+        return
 
-    logging.info(f"[BAŞARILI] {len(df_yeni)} adet {sagim_adi} sağım kaydı veritabanına işlendi.")
     logging.info("Bir sonraki zamanlanmış sağım saati bekleniyor...\n" + "=" * 50)
+
