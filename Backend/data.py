@@ -97,6 +97,7 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
 
     yeni_kayitlar = []
 
+    # 1. ADIM: Tüm ineklerin verisi burada üretilir ve listeye eklenir
     for idx, kupe in enumerate(kupeler):
         if kupe in istatistikler and sagim_zamani in istatistikler[kupe]:
             mean, std = istatistikler[kupe][sagim_zamani]
@@ -120,7 +121,9 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
             "sagim_zamani": sagim_zamani,
             "sut_miktari": sut,
         })
+    # --- FOR DÖNGÜSÜ BURADA BİTTİ ---
 
+    # 2. ADIM: Döngü bittikten sonra (4 boşluk geriye alındı) toplu kaydetme yapılır
     df_yeni = pd.DataFrame(yeni_kayitlar)
         
     try:
