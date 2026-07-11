@@ -26,18 +26,9 @@ except Exception as e:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        from alarms import start_scheduler
-        start_scheduler()
-    except Exception as e:
-        print(f"Zamanlayıcı başlatılamadı: {e}")
+    print("Süt Sihirbazı API servisi hazır!")
     yield
-    try:
-        from alarms import scheduler
-        if scheduler.running:
-            scheduler.shutdown()
-    except Exception as e:
-        print(f"Zamanlayıcı durdurulamadı: {e}")
+    print("Süt Sihirbazı API servisi kapanıyor...")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -419,6 +410,126 @@ def simule_data_aksam():
         return {"success": True, "message": "Akşam verileri başarıyla üretildi."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
+
+# === YENİ EKLEMELER: İNEK LİSTESİ VE GRAFİK İSTATİSTİKLERİ ===
+@app.get("/cows")
+def get_cows():
+    from alarms import get_db_connection
+    from psycopg2.extras import RealDictCursor
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = """
+        SELECT 
+            i.kupe_no, 
+            i.isim,
+            COALESCE(avg_tbl.avg_sut, 0.0) as ortalama_sut,
+            COALESCE(last_tbl.sut_miktari, 0.0) as son_sut,
+            CASE WHEN alarm_tbl.unread_count > 0 THEN 'Riskli' ELSE 'Sağlıklı' END as durum
+        FROM inekler i
+        LEFT JOIN (
+            SELECT kupe_no, ROUND(AVG(sut_miktari)::numeric, 1) as avg_sut
+            FROM sagim_kayitlari
+            GROUP BY kupe_no
+        ) avg_tbl ON i.kupe_no = avg_tbl.kupe_no
+        LEFT JOIN (
+            SELECT DISTINCT ON (kupe_no) kupe_no, sut_miktari
+            FROM sagim_kayitlari
+            ORDER BY kupe_no, tarih DESC, id DESC
+        ) last_tbl ON i.kupe_no = last_tbl.kupe_no
+        LEFT JOIN (
+            SELECT kupe_no, COUNT(*) as unread_count
+            FROM alarmlar
+            WHERE okundu = FALSE
+            GROUP BY kupe_no
+        ) alarm_tbl ON i.kupe_no = alarm_tbl.kupe_no
+        ORDER BY i.isim;
+        """
+        cursor.execute(query)
+        cows = cursor.fetchall()
+        cursor.close()
+        
+        # Tip dönüşümleri
+        for cow in cows:
+            cow["ortalama_sut"] = float(cow["ortalama_sut"])
+            cow["son_sut"] = float(cow["son_sut"])
+            
+        return {"success": True, "cows": cows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"İnek listesi alınırken hata oluştu: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/stats/farm")
+def get_farm_stats():
+    from alarms import get_db_connection
+    from psycopg2.extras import RealDictCursor
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = """
+        SELECT tarih, ROUND(SUM(sut_miktari)::numeric, 1) as toplam_sut
+        FROM sagim_kayitlari
+        GROUP BY tarih
+        ORDER BY tarih DESC
+        LIMIT 10;
+        """
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        
+        # Sonuçları kronolojik sıraya sokalım
+        rows.reverse()
+        
+        dates = [str(r["tarih"]) for r in rows]
+        yields = [float(r["toplam_sut"]) for r in rows]
+        
+        return {"success": True, "dates": dates, "yields": yields}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Çiftlik istatistikleri alınırken hata oluştu: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/cows/{kupe_no}/stats")
+def get_cow_stats(kupe_no: str):
+    from alarms import get_db_connection
+    from psycopg2.extras import RealDictCursor
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = """
+        SELECT tarih, ROUND(SUM(sut_miktari)::numeric, 1) as toplam_sut
+        FROM sagim_kayitlari
+        WHERE kupe_no = %s
+        GROUP BY tarih
+        ORDER BY tarih DESC
+        LIMIT 10;
+        """
+        cursor.execute(query, (kupe_no,))
+        rows = cursor.fetchall()
+        cursor.close()
+        
+        # Sonuçları kronolojik sıraya sokalım
+        rows.reverse()
+        
+        dates = [str(r["tarih"]) for r in rows]
+        yields = [float(r["toplam_sut"]) for r in rows]
+        
+        return {"success": True, "dates": dates, "yields": yields}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"İnek istatistikleri alınırken hata oluştu: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 
 

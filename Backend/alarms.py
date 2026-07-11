@@ -6,11 +6,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from exponent_server_sdk import PushClient, PushMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from zoneinfo import ZoneInfo
 
+# Veri üretimi fonksiyonunu import ediyoruz
+from data import sagim_verisi_uret_ve_kaydet
 
 load_dotenv()
 
-# LLM'i langchain_ollama veya sql_rag'den yükleyelim
 try:
     from sql_rag import local_llm
 except ImportError:
@@ -52,7 +54,6 @@ def send_push_notification(title: str, body: str):
         client = PushClient()
         messages = []
         for (token,) in tokens:
-            # Token'ın geçerli bir Expo token'ı olup olmadığını kontrol et
             if not token.startswith("ExponentPushToken"):
                 print(f"Geçersiz push token formatı atlanıyor: {token}")
                 continue
@@ -66,7 +67,6 @@ def send_push_notification(title: str, body: str):
         
         if messages:
             print(f"{len(messages)} cihaza push bildirimi gönderiliyor...")
-            # Toplu gönderim yapıyoruz
             responses = client.publish_multiple(messages)
             print("Bildirimler başarıyla gönderildi.")
     except Exception as e:
@@ -229,7 +229,6 @@ def generate_daily_summary():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 1. En son sağım yapılan tarihi bul
         cursor.execute("SELECT MAX(tarih) FROM sagim_kayitlari;")
         latest_date_row = cursor.fetchone()
         if not latest_date_row or not latest_date_row[0]:
@@ -237,28 +236,23 @@ def generate_daily_summary():
             return None
         today_date = latest_date_row[0]
         
-        # 2. Dünün tarihini bul
         cursor.execute("SELECT DISTINCT tarih FROM sagim_kayitlari WHERE tarih < %s ORDER BY tarih DESC LIMIT 1;", (today_date,))
         yesterday_date_row = cursor.fetchone()
         yesterday_date = yesterday_date_row[0] if yesterday_date_row else None
         
-        # 3. Bugünün toplam süt üretimini hesapla
         cursor.execute("SELECT SUM(sut_miktari) FROM sagim_kayitlari WHERE tarih = %s;", (today_date,))
         today_total_row = cursor.fetchone()
         today_total = float(today_total_row[0]) if today_total_row and today_total_row[0] is not None else 0.0
         
-        # 4. Dünün toplam süt üretimini hesapla
         yesterday_total = 0.0
         if yesterday_date:
             cursor.execute("SELECT SUM(sut_miktari) FROM sagim_kayitlari WHERE tarih = %s;", (yesterday_date,))
             yesterday_total_row = cursor.fetchone()
             yesterday_total = float(yesterday_total_row[0]) if yesterday_total_row and yesterday_total_row[0] is not None else 0.0
             
-        # 5. Değişim miktarını belirle
         diff = today_total - yesterday_total
         diff_str = f"+{diff:.1f}" if diff >= 0 else f"{diff:.1f}"
         
-        # 6. Günün en verimli ineğini bul
         cursor.execute("""
             SELECT i.isim, sk.kupe_no, SUM(sk.sut_miktari) as toplam_sut
             FROM sagim_kayitlari sk
@@ -280,7 +274,6 @@ def generate_daily_summary():
             
         print(f"Bugün ({today_date}): {today_total} L. Dün ({yesterday_date}): {yesterday_total} L. En verimli: {top_cow_name} ({top_cow_milk} L).")
         
-        # LLM Mesajı Üretimi (Basit Prompt)
         mesaj = f"""
         Çiftçiye özel günlük özet:
         Bugün({today_date}): {today_total:.1f} L
@@ -289,7 +282,6 @@ def generate_daily_summary():
         En verimli: {top_cow_name} ({top_cow_tag}) - {top_cow_milk:.1f} L
         """.strip()
 
-        # Bu tarih için zaten bir özet kaydı oluşturulmuş mu kontrol et
         cursor.execute(
             "SELECT id FROM gunluk_ozetler WHERE tarih = %s;",
             (today_date,)
@@ -297,7 +289,6 @@ def generate_daily_summary():
         exists = cursor.fetchone()
         
         if not exists:
-            # Özet kaydını yeni gunluk_ozetler tablosuna ekle
             cursor.execute(
                 """
                 INSERT INTO gunluk_ozetler (tarih, dunku_toplam_sut, bugunku_toplam_sut, en_verimli_inek_kupe_no, mesaj)
@@ -310,7 +301,6 @@ def generate_daily_summary():
         else:
             print(f"[{today_date}] - Günlük özet zaten veritabanında mevcut, tekrar kaydedilmedi.")
 
-        # Bildirimi gönder
         title = "🥛 Günlük Çiftlik Özeti"
         send_push_notification(title, mesaj)
         
@@ -324,14 +314,35 @@ def generate_daily_summary():
         if conn:
             conn.close()
 
-from zoneinfo import ZoneInfo
 scheduler = BackgroundScheduler(timezone=ZoneInfo("Europe/Istanbul"))
 
 def start_scheduler():
     if not scheduler.running:
-        scheduler.add_job(check_for_milk_drops, 'cron', hour=12, minute=0, id='milk_drop_checker_noon', name='Süt Düşüş Analizi (Öğle 12:00)')
-        scheduler.add_job(check_for_milk_drops, 'cron', hour=21, minute=0, id='milk_drop_checker_evening', name='Süt Düşüş Analizi (Akşam 21:00)')
-        scheduler.add_job(generate_daily_summary, 'cron', hour=21, minute=0, id='daily_summary_sender', name='Günlük Çiftlik Özeti (21:00)')
+        # Sadece veri üretim saatlerini tanımladık.
+        # Anomali tespiti ve günlük özet, veri üretimi bittiğinde otomatik tetiklenecek!
+        
+        # Sabah 11:30 Görevi (Veri Üretimi -> Anomali Tespiti)
+        scheduler.add_job(
+            func=sagim_verisi_uret_ve_kaydet, 
+            trigger='cron', 
+            hour=11, 
+            minute=30, 
+            args=['m'], 
+            id='simule_sabah', 
+            name='Sentetik Veri Üretimi ve Anomali Tespiti (Sabah 11:30)'
+        )
+        
+        # Akşam 19:00 Görevi (Veri Üretimi -> Anomali Tespiti -> Günlük Özet)
+        scheduler.add_job(
+            func=sagim_verisi_uret_ve_kaydet, 
+            trigger='cron', 
+            hour=19, 
+            minute=0, 
+            args=['e'], 
+            id='simule_aksam', 
+            name='Sentetik Veri Üretimi, Anomali ve Günlük Özet (Akşam 19:00)'
+        )
+        
         scheduler.start()
         print("Zamanlanmış görev motoru (Scheduler) başlatıldı.")
 

@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Veritabanı bağlantı ayarları ve Hata Yakalama (Düzeltildi)
+# Veritabanı bağlantı ayarları ve Hata Yakalama
 try:
     user = os.getenv("DB_USER")
     password = os.getenv("DB_PASSWORD")
@@ -24,7 +24,6 @@ try:
     VERITABANI_URL = f"postgresql://{user}:{password}@{host}:{port}/{veritabani_adi}"
     VERITABANI_URL2 = f"postgresql://{user}:{password}@{host}:{port}/Sut_Sihirbazi_Real"
     
-    # Motorlar hata yakalama bloğunun içerisine alındı
     engine = create_engine(VERITABANI_URL)
     engine2 = create_engine(VERITABANI_URL2)
 
@@ -52,7 +51,6 @@ def gecmis_istatistikleri_getir():
     """
     istatistikler = {}
     with engine2.connect() as conn:
-        # PostgreSQL'de ortalama ve standart sapmayı hesapla
         query = text("""
             SELECT kupe_no, sagim_zamani, 
                    AVG(sut_miktari) as ortalama, 
@@ -67,11 +65,9 @@ def gecmis_istatistikleri_getir():
             if kupe not in istatistikler:
                 istatistikler[kupe] = {}
             
-            # Tek kayıt varsa std None dönebilir, ona 1.2 varsayılanı atıyoruz
             std_val = float(std) if std is not None else 1.2
             istatistikler[kupe][zaman] = (float(mean), std_val)
 
-    # 21 ineği tamamlamak için küpe listesi
     kupeler = list(istatistikler.keys())
     if len(kupeler) < INEK_SAYISI:
         logging.warning("Veritabanında 21 inek istatistiği yok. Varsayılanlar eklenecek.")
@@ -93,7 +89,6 @@ def yeni_id_getir():
 def sagim_verisi_uret_ve_kaydet(sagim_zamani):
     bugun = date.today().strftime("%Y-%m-%d")
     
-    # Her sağımda güncel 2025 istatistiklerini referans alıyoruz
     istatistikler, kupeler = gecmis_istatistikleri_getir()
     baslangic_id = yeni_id_getir()
 
@@ -103,18 +98,14 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
     yeni_kayitlar = []
 
     for idx, kupe in enumerate(kupeler):
-        # 1. İneğin 2025'teki kendi karakteristiğini (mean ve std) al
         if kupe in istatistikler and sagim_zamani in istatistikler[kupe]:
             mean, std = istatistikler[kupe][sagim_zamani]
         else:
-            # İstatistiği yoksa makul bir varsayılan (fallback) değer
             mean = np.random.uniform(13.0, 16.0) if sagim_zamani == 'm' else np.random.uniform(10.5, 13.5)
             std = 1.2
 
-        # 2. İneğin kendi karakteristiğine (geçmiş verisine) sadık kalarak normal dağılımdan üret
         sut = np.random.normal(mean, std)
 
-        # 3. Anomali Enjeksiyonu
         if random.random() < ANOMALI_OLASILIGI:
             dusus_orani = np.random.uniform(0.35, 0.65)
             sut = sut * (1 - dusus_orani)
@@ -131,13 +122,34 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
         })
 
     df_yeni = pd.DataFrame(yeni_kayitlar)
-    df_yeni.to_sql(
-        name="sagim_kayitlari",
-        con=engine,
-        if_exists="append",
-        index=False,
-        chunksize=100,
-    )
+        
+    try:
+        with engine.begin() as conn:
+            df_yeni.to_sql(
+                name="sagim_kayitlari",
+                con=conn,
+                if_exists="append",
+                index=False,
+                chunksize=100,
+            )
+        logging.info(f"[BAŞARILI] {len(df_yeni)} adet {sagim_adi} sağım kaydı veritabanına işlendi.")
+        
+        # --- YENİ EKLENEN OTOMATİK TETİKLEYİCİ BÖLÜMÜ ---
+        # Circular import hatasını önlemek için import işlemini burada yapıyoruz:
+        from alarms import check_for_milk_drops, generate_daily_summary
+        
+        # 1. Veri kaydı başarılı olur olmaz ANOMALİ TESPİTİ çalıştırılır (Sabah & Akşam)
+        logging.info(f"{sagim_adi} verileri için anomali tespiti başlatılıyor...")
+        check_for_milk_drops()
+        
+        # 2. Eğer bu AKŞAM ('e') sağımıysa, anomali tespitinin ardından GÜNLÜK ÖZET çalıştırılır
+        if sagim_zamani == "e":
+            logging.info("Akşam sağımı bittiği için günlük özet üretimi başlatılıyor...")
+            generate_daily_summary()
+        # ------------------------------------------------
 
-    logging.info(f"[BAŞARILI] {len(df_yeni)} adet {sagim_adi} sağım kaydı veritabanına işlendi.")
+    except Exception as e:
+        logging.error(f"[HATA] {sagim_adi} sağım verileri veritabanına kaydedilirken hata oluştu: {e}")
+        return
+
     logging.info("Bir sonraki zamanlanmış sağım saati bekleniyor...\n" + "=" * 50)
