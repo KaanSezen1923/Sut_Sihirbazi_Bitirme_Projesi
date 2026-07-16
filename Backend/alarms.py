@@ -1,3 +1,4 @@
+from yaml import tokens
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -7,6 +8,7 @@ from exponent_server_sdk import PushClient, PushMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from zoneinfo import ZoneInfo
+
 
 # Veri üretimi fonksiyonunu import ediyoruz
 from data import sagim_verisi_uret_ve_kaydet
@@ -37,7 +39,7 @@ def get_db_connection():
         port=5432
     )
 
-def send_push_notification(title: str, body: str):
+def send_push_notification(title: str, body: str, data: dict = None):
     """Kayıtlı tüm cihaz token'larına push bildirimi gönderir."""
     conn = None
     try:
@@ -52,25 +54,41 @@ def send_push_notification(title: str, body: str):
             return
 
         client = PushClient()
-        messages = []
-        for (token,) in tokens:
-            if not token.startswith("ExponentPushToken"):
-                print(f"Geçersiz push token formatı atlanıyor: {token}")
-                continue
-                
-            messages.append(PushMessage(
-                to=token,
-                title=title,
-                body=body,
-                data={"target_screen": "Notifications"}
-            ))
+        basarili_sayisi = 0
         
-        if messages:
-            print(f"{len(messages)} cihaza push bildirimi gönderiliyor...")
-            responses = client.publish_multiple(messages)
-            print("Bildirimler başarıyla gönderildi.")
+        for (token,) in tokens:
+            # Hem 'ExponentPushToken' hem de yeni 'ExpoPushToken' formatını kabul ediyoruz
+            if not (token.startswith("ExponentPushToken") or token.startswith("ExpoPushToken")):
+                print(f"⚠️ Geçersiz push token formatı atlanıyor: {token}")
+                continue
+            
+            try:
+                # Target screen ve custom data birleştiriliyor
+                notification_data = {"target_screen": "Notifications"}
+                if data:
+                    notification_data.update(data)
+
+                # moviemcp projenizdeki gibi tekli ve güvenli gönderim yapıyoruz
+                client.publish(
+                    PushMessage(
+                        to=token,
+                        title=title,
+                        body=body,
+                        sound="default",          # 🔊 Bildirimin ses çıkarması için zorunlu
+                        priority="high",          # ⚡ Android'de ekrana pop-up olarak düşmesi için
+                        channel_id="default",     # 📱 Android bildirim kanalı eşleşmesi için
+                        data=notification_data
+                    )
+                )
+                basarili_sayisi += 1
+            except Exception as e:
+                print(f"❌ '{token}' cihazına bildirim gönderilirken hata oluştu: {e}")
+                
+        if basarili_sayisi > 0:
+            print(f"✅ Toplam {basarili_sayisi} cihaza push bildirimi başarıyla gönderildi.")
+            
     except Exception as e:
-        print(f"Push bildirim gönderim hatası: {e}")
+        print(f"❌ Veritabanı veya Push bildirim genel hatası: {e}")
     finally:
         if conn:
             conn.close()
@@ -81,6 +99,9 @@ def check_for_milk_drops():
     Eğer bir ineğin son sağımı, aynı sağım zamanındaki (sabah/akşam) 
     önceki 3 sağım ortalamasına kıyasla %20 veya daha fazla düşmüşse alarm oluşturur.
     """
+
+
+ 
     print("Süt düşüş analizi başlatılıyor...")
     conn = None
     try:
@@ -199,7 +220,7 @@ def check_for_milk_drops():
                 print(f"[{kupe_no}] - Alarm başarıyla oluşturuldu ve veritabanına eklendi.")
 
                 title = f"🚨 {isim} İçin Süt Alarmı!"
-                send_push_notification(title, mesaj)
+                send_push_notification(title, mesaj, data={"highlight_cow": kupe_no, "alert_msg": mesaj})
             else:
                 print(f"[{kupe_no}] - {tarih} ({sagim_zamani}) zamanlı alarm zaten veritabanında mevcut, atlandı.")
         
@@ -223,6 +244,7 @@ def generate_daily_summary():
     Günlük toplam süt üretimini dünün üretimiyle kıyaslar, günün en verimli ineğini tespit eder,
     bu özeti veritabanındaki 'gunluk_ozetler' tablosuna kaydeder ve çiftçiye push bildirimi gönderir.
     """
+
     print("Günlük çiftlik özeti üretiliyor...")
     conn = None
     try:
@@ -302,7 +324,7 @@ def generate_daily_summary():
             print(f"[{today_date}] - Günlük özet zaten veritabanında mevcut, tekrar kaydedilmedi.")
 
         title = "🥛 Günlük Çiftlik Özeti"
-        send_push_notification(title, mesaj)
+        send_push_notification(title, mesaj, data={"alert_msg": mesaj})
         
         return mesaj
     except Exception as e:
@@ -325,8 +347,8 @@ def start_scheduler():
         scheduler.add_job(
             func=sagim_verisi_uret_ve_kaydet, 
             trigger='cron', 
-            hour=11, 
-            minute=30, 
+            hour=16, 
+            minute=48, 
             args=['m'], 
             id='simule_sabah', 
             name='Sentetik Veri Üretimi ve Anomali Tespiti (Sabah 11:30)'
@@ -336,8 +358,8 @@ def start_scheduler():
         scheduler.add_job(
             func=sagim_verisi_uret_ve_kaydet, 
             trigger='cron', 
-            hour=19, 
-            minute=0, 
+            hour=16, 
+            minute=50, 
             args=['e'], 
             id='simule_aksam', 
             name='Sentetik Veri Üretimi, Anomali ve Günlük Özet (Akşam 19:00)'

@@ -14,10 +14,9 @@ const COLORS = {
 export default function TabsLayout() {
   const insets = useSafeAreaInsets();
 
-  // Android ve iOS için dinamik safe area hesaplaması
   const tabHeight = Platform.OS === 'ios' 
     ? (65 + insets.bottom) 
-    : (55 + Math.max(insets.bottom, 14)); // Android alt buton çakışmalarını önlemek için minimum 14px boşluk
+    : (55 + Math.max(insets.bottom, 14)); 
     
   const tabPaddingBottom = Platform.OS === 'ios'
     ? insets.bottom
@@ -28,7 +27,7 @@ export default function TabsLayout() {
       screenOptions={{
         tabBarActiveTintColor: COLORS.primary,
         tabBarInactiveTintColor: COLORS.textSecondary,
-        tabBarHideOnKeyboard: true, // Klavye açıldığında sekmeleri gizleyerek çakışmayı önle
+        tabBarHideOnKeyboard: true, 
         tabBarStyle: [
           styles.tabBar,
           {
@@ -43,30 +42,33 @@ export default function TabsLayout() {
         headerTitleAlign: 'left',
       }}
     >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Ana Sayfa',
-          tabBarLabel: 'Ana Sayfa',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons name={focused ? "home" : "home-outline"} size={22} color={color} />
-          ),
-          headerTitle: 'Süt Sihirbazı Dashboard',
-        }}
-      />
-      
+      {/* VİZYON GÜNCELLESİ: 1. SEKME ARTIK SÜT SİHİRBAZI */}
       <Tabs.Screen
         name="chat"
         options={{
-          title: 'Sohbet',
-          tabBarLabel: 'Sohbet',
+          title: 'Sihirbaz',
+          tabBarLabel: 'Sihirbaz',
           tabBarIcon: ({ color, focused }) => (
             <Ionicons name={focused ? "chatbubble-ellipses" : "chatbubble-ellipses-outline"} size={22} color={color} />
           ),
-          headerTitle: 'Sihirbazla Sohbet',
+          headerTitle: ' Süt Sihirbazı ',
         }}
       />
 
+      {/* 2. SEKME: DENETİM MASASI (STATİK GENEL BAKIŞ) */}
+      <Tabs.Screen
+        name="index"
+        options={{
+          title: 'Özetler',
+          tabBarLabel: 'Özetler',
+          tabBarIcon: ({ color, focused }) => (
+            <Ionicons name={focused ? "grid" : "grid-outline"} size={22} color={color} />
+          ),
+          headerTitle: '📊 Çiftlik Denetim Masası',
+        }}
+      />
+
+      {/* 3. SEKME: SÜRÜ LİSTESİ */}
       <Tabs.Screen
         name="herd"
         options={{
@@ -75,10 +77,11 @@ export default function TabsLayout() {
           tabBarIcon: ({ color, focused }) => (
             <MaterialCommunityIcons name="cow" size={24} color={color} />
           ),
-          headerTitle: 'İneklerim ve Sürü Yönetimi',
+          headerTitle: '🐄 İneklerim ve Sürü Yönetimi',
         }}
       />
 
+      {/* 4. SEKME: RAPOR ARŞİVİ */}
       <Tabs.Screen
         name="stats"
         options={{
@@ -87,7 +90,7 @@ export default function TabsLayout() {
           tabBarIcon: ({ color, focused }) => (
             <Ionicons name={focused ? "bar-chart" : "bar-chart-outline"} size={22} color={color} />
           ),
-          headerTitle: 'Süt Verim Analizleri',
+          headerTitle: '📈 Detaylı Verim Analizleri',
         }}
       />
     </Tabs>

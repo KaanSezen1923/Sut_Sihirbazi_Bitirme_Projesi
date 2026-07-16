@@ -8,7 +8,6 @@ from langgraph.graph import START, END, StateGraph
 import os 
 from dotenv import load_dotenv
 import time
-
 load_dotenv()
 
 # --- YARDIMCI FONKSİYONLAR ---
@@ -133,6 +132,7 @@ def write_query(state: State):
 def execute_query(state: State):
     execute_tool = QuerySQLDatabaseTool(db=db)
     return {"result": execute_tool.invoke(state["query"])}
+    
 
 def generate_sql_answer(state: State):
     # Boş sonuç kontrolü — LLM'e bırakma

@@ -136,7 +136,7 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
                 chunksize=100,
             )
         logging.info(f"[BAŞARILI] {len(df_yeni)} adet {sagim_adi} sağım kaydı veritabanına işlendi.")
-        
+
         # --- YENİ EKLENEN OTOMATİK TETİKLEYİCİ BÖLÜMÜ ---
         # Circular import hatasını önlemek için import işlemini burada yapıyoruz:
         from alarms import check_for_milk_drops, generate_daily_summary

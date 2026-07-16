@@ -22,13 +22,25 @@ import { StepIndicator } from '../../components/StepIndicator';
 import Constants from 'expo-constants';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-
 interface Message {
   id: string;
   text: string;
   spokenText?: string;
   sender: 'user' | 'bot';
   timestamp: Date;
+  isStreaming?: boolean; // SSE akışı devam ediyor mu?
+  step?: string;         // Backend'den gelen anlık adım bildirimi
+}
+
+// ZİL MÖNÜSÜ İÇİN ALARM ARAYÜZÜ
+interface Alarm {
+  id: number;
+  kupe_no: string;
+  isim: string;
+  tarih: string;
+  sagim_zamani: string;
+  dusus_yuzdesi: number;
+  mesaj: string;
 }
 
 const getApiUrl = () => {
@@ -87,11 +99,20 @@ export default function Chat() {
 
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
+
+  // AKIŞ VE İŞLEM DURUMLARI
   const [isLoading, setIsLoading] = useState(false);
+  const activeEventSourceRef = useRef<EventSource | null>(null);
+
+  // SES DURUMLARI
   const [isRecording, setIsRecording] = useState(false);
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string>('Sorunuz analiz ediliyor...');
+
+  // YENİ: ZİL VE ALARM STATE'LERİ
+  const [unreadAlarms, setUnreadAlarms] = useState<Alarm[]>([]);
+  const [isBellOpen, setIsBellOpen] = useState(false);
 
   const soundRef = useRef<Audio.Sound | null>(null);
   const flatListRef = useRef<FlatList>(null);
@@ -99,9 +120,9 @@ export default function Chat() {
   useEffect(() => {
     if (queryParam && typeof queryParam === 'string') {
       sendMessage(queryParam);
-      // Temizlemek için parametreyi sıfırla
       router.setParams({ query: undefined });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryParam]);
 
   useEffect(() => {
@@ -111,8 +132,40 @@ export default function Chat() {
     })();
     return () => {
       soundRef.current?.unloadAsync();
+      if (activeEventSourceRef.current) {
+        activeEventSourceRef.current.close();
+      }
     };
   }, []);
+
+  // OKUNMAMIŞ ALARMLARI ÇEK (7/24 Gözcü Bağlantısı)
+  const fetchUnreadAlarms = async () => {
+    try {
+      const res = await fetch(`${API_URL}/alarms?unread_only=true`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) setUnreadAlarms(data.alarms || []);
+      }
+    } catch {
+      // Alarm çekme hatası
+    }
+  };
+
+  useEffect(() => {
+    fetchUnreadAlarms();
+    const interval = setInterval(fetchUnreadAlarms, 20000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ALARMA TIKLANDIĞINDA ÖZETLER KARTINA AKTAR (AHTAPOT SICRAMASI)
+  const handleAlarmClick = (alarm: Alarm) => {
+    setIsBellOpen(false);
+    // Özetler sekmesine zıpla ve parametre olarak alarm bilgisini ilet
+    router.push({
+      pathname: '/',
+      params: { highlight_cow: alarm.kupe_no, alert_msg: alarm.mesaj }
+    });
+  };
 
   const speakText = async (messageId: string, text: string) => {
     if (!text || !text.trim()) return;
@@ -146,16 +199,40 @@ export default function Chat() {
     }
   };
 
+  // İŞLEMİ GERİ ALMA / İPTAL ETME (ABORT SSE)
+  const handleCancelStreaming = () => {
+    if (activeEventSourceRef.current) {
+      activeEventSourceRef.current.close();
+      activeEventSourceRef.current = null;
+    }
+    setIsLoading(false);
+
+    // Son eklenen bekleyen/streaming bot mesajını iptal edildi olarak güncelle
+    setMessages((prev) =>
+      prev.map((msg, index) =>
+        index === prev.length - 1 && msg.sender === 'bot' && msg.isStreaming
+          ? { ...msg, text: "⚠️ *İşlem kullanıcı tarafından durduruldu.*", isStreaming: false, step: undefined }
+          : msg
+      )
+    );
+  };
+
   const sendMessage = async (textOverride?: string | any) => {
     const finalQuery = (typeof textOverride === 'string' ? textOverride : inputText).trim();
-    if (!finalQuery) return;
+    if (!finalQuery || isLoading) return;
 
-    setMessages((prev) => [...prev, {
-      id: `user-${Date.now()}`,
-      text: finalQuery,
-      sender: 'user',
-      timestamp: new Date(),
-    }]);
+    if (activeEventSourceRef.current) {
+      activeEventSourceRef.current.close();
+    }
+
+    const userMsgId = `user-${Date.now()}`;
+    const botMsgId = `bot-${Date.now() + 1}`;
+
+    setMessages((prev) => [
+      ...prev,
+      { id: userMsgId, text: finalQuery, sender: 'user', timestamp: new Date() },
+      { id: botMsgId, text: '', sender: 'bot', timestamp: new Date(), isStreaming: true, step: 'Sorunuz analiz ediliyor...' }
+    ]);
 
     if (typeof textOverride !== 'string') setInputText('');
     setIsLoading(true);
@@ -169,33 +246,63 @@ export default function Chat() {
         body: JSON.stringify({ question: finalQuery }),
       });
 
+      activeEventSourceRef.current = es;
+
       es.addEventListener('message', (event) => {
         try {
           const data = JSON.parse(event.data ?? '{}');
           if (data.done) {
             const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-            setMessages((prev) => [...prev, {
-              id: `bot-${Date.now()}`,
-              text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`,
-              spokenText: data.answer,
-              sender: 'bot',
-              timestamp: new Date(),
-            }]);
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === botMsgId
+                  ? {
+                    ...msg,
+                    text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`,
+                    spokenText: data.answer,
+                    isStreaming: false,
+                    step: undefined
+                  }
+                  : msg
+              )
+            );
             setIsLoading(false);
             es.close();
+            activeEventSourceRef.current = null;
           } else if (data.step) {
             setCurrentStep(data.step);
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === botMsgId
+                  ? { ...msg, step: data.step }
+                  : msg
+              )
+            );
           }
         } catch (e) { }
       });
 
       es.addEventListener('error', () => {
-        setMessages((prev) => [...prev, { id: `error-${Date.now()}`, text: 'Bağlantı hatası oluştu.', sender: 'bot', timestamp: new Date() }]);
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === botMsgId
+              ? { ...msg, text: '❌ *Bağlantı hatası oluştu.*', isStreaming: false, step: undefined }
+              : msg
+          )
+        );
         setIsLoading(false);
         es.close();
+        activeEventSourceRef.current = null;
       });
     } catch (error) {
       setIsLoading(false);
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === botMsgId
+            ? { ...msg, text: '❌ *Bağlantı başlatılamadı.*', isStreaming: false, step: undefined }
+            : msg
+        )
+      );
     }
   };
 
@@ -233,26 +340,63 @@ export default function Chat() {
       const userText = transcribeData.transcription || transcribeData.text;
       if (!userText) throw new Error('Ses anlaşılamadı');
 
-      setMessages((prev) => [...prev, { id: `user-${Date.now()}`, text: userText, sender: 'user', timestamp: new Date() }]);
+      const userMsgId = `user-${Date.now()}`;
+      const botMsgId = `bot-${Date.now() + 1}`;
+
+      setMessages((prev) => [
+        ...prev,
+        { id: userMsgId, text: userText, sender: 'user', timestamp: new Date() },
+        { id: botMsgId, text: '', sender: 'bot', timestamp: new Date(), isStreaming: true, step: 'Sorunuz analiz ediliyor...' }
+      ]);
+
       setCurrentStep('Sorunuz analiz ediliyor...');
       const es = new EventSource(`${API_URL}/query/sql/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: userText }) });
+      activeEventSourceRef.current = es;
 
       es.addEventListener('message', (event) => {
         try {
           const data = JSON.parse(event.data ?? '{}');
           if (data.done) {
             const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-            setMessages((prev) => [...prev, { id: `bot-${Date.now()}`, text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`, spokenText: data.answer, sender: 'bot', timestamp: new Date() }]);
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === botMsgId
+                  ? {
+                    ...msg,
+                    text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`,
+                    spokenText: data.answer,
+                    isStreaming: false,
+                    step: undefined
+                  }
+                  : msg
+              )
+            );
             setIsLoading(false);
             es.close();
+            activeEventSourceRef.current = null;
           } else if (data.step) {
             setCurrentStep(data.step);
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === botMsgId
+                  ? { ...msg, step: data.step }
+                  : msg
+              )
+            );
           }
         } catch (e) { }
       });
       es.addEventListener('error', () => {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === botMsgId
+              ? { ...msg, text: '❌ *Sizi anlayamadım veya bağlantı koptu.*', isStreaming: false, step: undefined }
+              : msg
+          )
+        );
         setIsLoading(false);
         es.close();
+        activeEventSourceRef.current = null;
       });
     } catch (error) {
       setMessages((prev) => [...prev, { id: `error-${Date.now()}`, text: 'Sizi anlayamadım.', sender: 'bot', timestamp: new Date() }]);
@@ -262,7 +406,7 @@ export default function Chat() {
 
   useEffect(() => {
     flatListRef.current?.scrollToEnd({ animated: true });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, currentStep]);
 
   const renderItem = ({ item }: { item: Message }) => {
     const isUser = item.sender === 'user';
@@ -283,10 +427,14 @@ export default function Chat() {
         <View style={styles.botContent}>
           <View style={styles.botHeaderRow}>
             <Text style={styles.botSenderName}>Süt Sihirbazı</Text>
-            <TouchableOpacity style={styles.speakerButton} onPress={() => speakText(item.id, item.spokenText ?? item.text)}>
-              <Ionicons name={speakingId === item.id ? 'volume-high' : 'volume-medium-outline'} size={18} color={speakingId === item.id ? COLORS.primary : COLORS.textSecondary} />
-            </TouchableOpacity>
+            {!item.isStreaming && item.text ? (
+              <TouchableOpacity style={styles.speakerButton} onPress={() => speakText(item.id, item.spokenText ?? item.text)}>
+                <Ionicons name={speakingId === item.id ? 'volume-high' : 'volume-medium-outline'} size={18} color={speakingId === item.id ? COLORS.primary : COLORS.textSecondary} />
+              </TouchableOpacity>
+            ) : null}
           </View>
+
+          {/* SSE AKIŞI SIRASINDA CANLI STEP GÖSTERİMİ */}
           <Markdown style={markdownStyles} rules={markdownRules}>
             {item.text}
           </Markdown>
@@ -298,6 +446,54 @@ export default function Chat() {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#fff" />
+
+      {/* YENİ: SOHBET ÜST BARI VE BİLDİRİM ZİLİ */}
+      <View style={styles.topBar}>
+        <View style={styles.topBarTitleRow}>
+          <MaterialCommunityIcons name="magic-staff" size={22} color="#1B5E20" />
+          <Text style={styles.topBarTitle}>Süt Sihirbazı Kaptan Köşkü</Text>
+        </View>
+
+        {/* ZİL BUTONU */}
+        <TouchableOpacity style={styles.bellButton} onPress={() => setIsBellOpen(!isBellOpen)} activeOpacity={0.8}>
+          <Ionicons name={unreadAlarms.length > 0 ? "notifications" : "notifications-outline"} size={26} color={unreadAlarms.length > 0 ? "#D32F2F" : "#546E7A"} />
+          {unreadAlarms.length > 0 && (
+            <View style={styles.bellBadge}>
+              <Text style={styles.bellBadgeText}>{unreadAlarms.length}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {/* YENİ: AÇILIR ZİL MENÜSÜ (DROPDOWN) */}
+      {isBellOpen && (
+        <View style={styles.dropdownContainer}>
+          <View style={styles.dropdownHeader}>
+            <Text style={styles.dropdownTitle}>🚨 Anlık Anomali Tespitleri</Text>
+            <TouchableOpacity onPress={() => setIsBellOpen(false)}><Ionicons name="close" size={20} color="#78909C" /></TouchableOpacity>
+          </View>
+
+          {unreadAlarms.length > 0 ? (
+            <ScrollView style={{ maxHeight: 250 }}>
+              {unreadAlarms.map((alarm) => (
+                <TouchableOpacity key={alarm.id} style={styles.dropdownItem} onPress={() => handleAlarmClick(alarm)}>
+                  <View style={styles.dropdownItemHeader}>
+                    <Text style={styles.dropdownCowName}>🐄 {alarm.isim} (TR{alarm.kupe_no})</Text>
+                    <View style={styles.dropdownDropBadge}><Text style={styles.dropdownDropText}>-%{alarm.dusus_yuzdesi.toFixed(0)}</Text></View>
+                  </View>
+                  <Text style={styles.dropdownMsg} numberOfLines={2}>{alarm.mesaj}</Text>
+                  <Text style={styles.dropdownActionHint}>Özetlerde İncele &rarr;</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          ) : (
+            <View style={styles.dropdownEmpty}>
+              <Ionicons name="checkmark-circle" size={32} color="#2E7D32" />
+              <Text style={styles.dropdownEmptyText}>Şu an riskli veya sütü düşen inek bulunmuyor.</Text>
+            </View>
+          )}
+        </View>
+      )}
 
       {/* CHAT ALANI */}
       <FlatList
@@ -332,7 +528,7 @@ export default function Chat() {
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shortcutsContent}>
             {SHORTCUTS.map((shortcut, idx) => (
               <TouchableOpacity key={idx} style={styles.shortcutChip} onPress={() => !isLoading && sendMessage(shortcut.query)} disabled={isLoading}>
-                <Text style={styles.shortcutText}>{shortcut.label}</Text>
+                <Text style={[styles.shortcutText, isLoading && { color: '#B0BEC5' }]}>{shortcut.label}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -344,7 +540,7 @@ export default function Chat() {
               style={styles.input}
               value={inputText}
               onChangeText={setInputText}
-              placeholder="Sihirbaza sorun..."
+              placeholder={isLoading ? "Sihirbazın yanıt vermesi bekleniyor..." : "Sihirbaza sorun..."}
               placeholderTextColor="#7cb342"
               multiline
               maxLength={1000}
@@ -352,8 +548,14 @@ export default function Chat() {
               returnKeyType="default"
               blurOnSubmit={false}
             />
-            {inputText.trim().length > 0 ? (
-              <TouchableOpacity style={styles.sendButton} onPress={() => sendMessage()} disabled={isLoading}>
+
+            {isLoading ? (
+              /* İŞLEMİ GERİ ALMA / DURDURMA BUTONU */
+              <TouchableOpacity style={styles.cancelButton} onPress={handleCancelStreaming}>
+                <Ionicons name="stop" size={20} color="#fff" />
+              </TouchableOpacity>
+            ) : inputText.trim().length > 0 ? (
+              <TouchableOpacity style={styles.sendButton} onPress={() => sendMessage()}>
                 <Ionicons name="arrow-up" size={24} color="#fff" />
               </TouchableOpacity>
             ) : (
@@ -415,6 +617,26 @@ const styles = StyleSheet.create({
   botSenderName: { fontSize: 14, fontWeight: 'bold', color: COLORS.primary, marginBottom: 4 },
   botHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   speakerButton: { padding: 4, marginBottom: 4 },
+
+  // STREAMING ADIM BALONCUĞU STİLLERİ
+  streamingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.secondary,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginTop: 4,
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.primarySoft
+  },
+  streamingStepText: {
+    color: COLORS.primarySoft,
+    fontSize: 14,
+    fontStyle: 'italic',
+    fontWeight: '500'
+  },
+
   loadingContainer: { flexDirection: 'row', alignItems: 'center', marginLeft: 42, marginTop: 5, marginBottom: 20 },
   loadingIcon: { marginRight: 8, opacity: 0.8 },
   inputWrapper: { backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#F1F8E9', paddingHorizontal: 16, paddingVertical: 12, paddingBottom: Platform.OS === 'ios' ? 8 : 12 },
@@ -423,6 +645,10 @@ const styles = StyleSheet.create({
   micButton: { width: 42, height: 42, justifyContent: 'center', alignItems: 'center', borderRadius: 21, backgroundColor: COLORS.secondary },
   recordingActive: { backgroundColor: COLORS.danger, elevation: 4 },
   sendButton: { width: 42, height: 42, backgroundColor: COLORS.primary, borderRadius: 21, justifyContent: 'center', alignItems: 'center' },
+
+  // İPTAL ET / DURDUR BUTONU
+  cancelButton: { width: 42, height: 42, backgroundColor: COLORS.danger, borderRadius: 21, justifyContent: 'center', alignItems: 'center' },
+
   emptyChatContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 60 },
   emptyIconContainer: { marginBottom: 24, padding: 24, backgroundColor: COLORS.secondary, borderRadius: 60, borderWidth: 1, borderColor: '#C5E1A5' },
   welcomeTitle: { fontSize: 24, fontWeight: 'bold', color: COLORS.primary, marginBottom: 12 },
@@ -431,4 +657,25 @@ const styles = StyleSheet.create({
   shortcutsContent: { paddingHorizontal: 16, flexDirection: 'row' },
   shortcutChip: { backgroundColor: COLORS.secondary, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: '#C5E1A5', marginRight: 8 },
   shortcutText: { color: COLORS.primarySoft, fontSize: 14, fontWeight: '600' },
+
+  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F1F8E9', backgroundColor: '#F9FBF9', zIndex: 10 },
+  topBarTitleRow: { flexDirection: 'row', alignItems: 'center' },
+  topBarTitle: { fontSize: 16, fontWeight: 'bold', color: '#1B5E20', marginLeft: 8 },
+  bellButton: { padding: 4, position: 'relative' },
+  bellBadge: { position: 'absolute', top: 2, right: 2, backgroundColor: '#D32F2F', borderRadius: 10, minWidth: 18, height: 18, justifyContent: 'center', alignItems: 'center', borderWidth: 1.5, borderColor: '#fff' },
+  bellBadgeText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
+  
+  // AÇILIR ZİL MENÜSÜ STİLLERİ
+  dropdownContainer: { position: 'absolute', top: 56, right: 16, left: 16, backgroundColor: '#ffffff', borderRadius: 16, borderWidth: 1, borderColor: '#E0E8E0', padding: 12, zIndex: 100, elevation: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 10 },
+  dropdownHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#F1F8E9', marginBottom: 8 },
+  dropdownTitle: { fontSize: 14, fontWeight: 'bold', color: '#D32F2F' },
+  dropdownItem: { backgroundColor: '#FFEBEE', padding: 10, borderRadius: 10, marginBottom: 8, borderWidth: 1, borderColor: '#FFCDD2' },
+  dropdownItemHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  dropdownCowName: { fontSize: 13, fontWeight: 'bold', color: '#B71C1C' },
+  dropdownDropBadge: { backgroundColor: '#D32F2F', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
+  dropdownDropText: { color: '#fff', fontSize: 11, fontWeight: 'bold' },
+  dropdownMsg: { fontSize: 12, color: '#37474F', lineHeight: 16 },
+  dropdownActionHint: { fontSize: 11, fontWeight: 'bold', color: '#1E88E5', marginTop: 6, textAlign: 'right' },
+  dropdownEmpty: { padding: 20, alignItems: 'center', justifyContent: 'center' },
+  dropdownEmptyText: { fontSize: 13, color: '#546E7A', marginTop: 8, textAlign: 'center' },
 });

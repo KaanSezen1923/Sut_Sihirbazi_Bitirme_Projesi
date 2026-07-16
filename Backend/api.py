@@ -6,7 +6,6 @@ from typing import Optional, AsyncGenerator
 from sql_rag import rag_app
 from csv_rag import csv_rag_app
 import uvicorn
-import whisper
 import os
 import tempfile
 import json
@@ -15,6 +14,7 @@ import wave
 from groq import Groq
 from piper import PiperVoice
 from data import sagim_verisi_uret_ve_kaydet
+from alarms import start_scheduler,scheduler
 
 client = Groq(api_key=os.environ.get("WHISPER_API_KEY"))
 
@@ -27,8 +27,17 @@ except Exception as e:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Süt Sihirbazı API servisi hazır!")
+    
+    # 1. Sunucu başlarken zamanlanmış görev motorunu (Scheduler) çalıştır
+    start_scheduler() 
+    
     yield
-    print("Süt Sihirbazı API servisi kapanıyor...")
+    
+    # 2. Sunucu kapanırken arka plan görevlerini güvenlice durdur
+    print("Süt Sihirbazı API servisi kapanıyor...") #
+    if scheduler.running:
+        scheduler.shutdown()
+        print("Zamanlanmış görev motoru durduruldu.")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -238,6 +247,7 @@ def register_push_token(request: PushTokenRequest):
     token = request.token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token boş olamaz.")
+
     
     from alarms import get_db_connection
     conn = None
@@ -411,7 +421,69 @@ def simule_data_aksam():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
 
-# === YENİ EKLEMELER: İNEK LİSTESİ VE GRAFİK İSTATİSTİKLERİ ===
+@app.get("/cows/daily-change")
+def get_cows_daily_change():
+    from alarms import get_db_connection
+    from psycopg2.extras import RealDictCursor
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # En son tarih (bugün) ve bir önceki tarih (dün) bulunarak inek bazlı verimler kıyaslanır
+        query = """
+        WITH son_tarih AS (
+            SELECT MAX(tarih) as bugun FROM sagim_kayitlari
+        ),
+        onceki_tarih AS (
+            SELECT DISTINCT tarih as dun 
+            FROM sagim_kayitlari, son_tarih 
+            WHERE tarih < son_tarih.bugun 
+            ORDER BY tarih DESC 
+            LIMIT 1
+        ),
+        bugun_sut AS (
+            SELECT kupe_no, SUM(sut_miktari) as bugun_toplam
+            FROM sagim_kayitlari, son_tarih
+            WHERE tarih = son_tarih.bugun
+            GROUP BY kupe_no
+        ),
+        dun_sut AS (
+            SELECT kupe_no, SUM(sut_miktari) as dun_toplam
+            FROM sagim_kayitlari, onceki_tarih
+            WHERE tarih = onceki_tarih.dun
+            GROUP BY kupe_no
+        )
+        SELECT 
+            i.kupe_no,
+            i.isim,
+            COALESCE(d.dun_toplam, 0.0) as dunku_sut,
+            COALESCE(b.bugun_toplam, 0.0) as bugunku_sut,
+            CASE 
+                WHEN COALESCE(d.dun_toplam, 0) > 0 THEN 
+                    ROUND(((COALESCE(b.bugun_toplam, 0) - d.dun_toplam) / d.dun_toplam * 100)::numeric, 1)
+                ELSE 0.0 
+            END as degisim_orani
+        FROM inekler i
+        LEFT JOIN dun_sut d ON i.kupe_no = d.kupe_no
+        LEFT JOIN bugun_sut b ON i.kupe_no = b.kupe_no
+        ORDER BY degisim_orani DESC, i.isim ASC;;
+        """
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        
+        for row in rows:
+            row["dunku_sut"] = float(row["dunku_sut"])
+            row["bugunku_sut"] = float(row["bugunku_sut"])
+            row["degisim_orani"] = float(row["degisim_orani"])
+            
+        return {"success": True, "data": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Günlük değişim verileri alınırken hata oluştu: {e}")
+    finally:
+        if conn:
+            conn.close()
 @app.get("/cows")
 def get_cows():
     from alarms import get_db_connection

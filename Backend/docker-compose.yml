@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # 1. MEVCUT WEB API SERVİSİNİZ (Buraya dokunmuyoruz)
   sut-sihirbazi-api:
     build: .
     container_name: sut_sihirbazi_api
@@ -9,8 +8,9 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
-      - whisper_model_cache:/root/.cache/whisper
-    entrypoint: [ "sh", "-c", "sed -i 's/\\r$$//' /app/start.sh && chmod +x /app/start.sh && /app/start.sh" ]
+
+    # Geliştirilmiş, temizlenmiş entrypoint
+    entrypoint: [ "sh", "-c", "/app/start.sh" ]
     environment:
       - TZ=Europe/Istanbul
       - PYTHONUNBUFFERED=1
@@ -24,27 +24,15 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
-
-  # 2. YENİ EKLENEN BAĞIMSIZ ZAMANLAYICI (SCHEDULER) SERVİSİ
-  sut-sihirbazi-scheduler:
-    build: .
-    container_name: sut_sihirbazi_scheduler
-    volumes:
-      - .:/app
-    # start.sh yerine doğrudan yeni oluşturduğumuz python dosyasını çalıştırıyoruz
-    command: [ "python", "-u", "scheduler_main.py" ]
-    environment:
-      - TZ=Europe/Istanbul
-      - PYTHONUNBUFFERED=1
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_HOST=${DB_HOST}
-      - DB_NAME=${DB_NAME}
-      - LOCAL_LLM=${LOCAL_LLM}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: always
-
-volumes:
-  whisper_model_cache:
+    # === YENİ EKLENEN OTOMASYON BLOĞU ===
+    develop:
+      watch:
+        # requirements.txt veya Dockerfile değişirse otomatik rebuild et
+        - action: rebuild
+          path: ./requirements.txt
+        - action: rebuild
+          path: ./Dockerfile
+        # Diğer python veya script kodları değişirse dosyayı senkronize et (uvicorn --reload halledecek)
+        - action: sync
+          path: .
+          target: /app
