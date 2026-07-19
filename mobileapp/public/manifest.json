@@ -1,0 +1,29 @@
+{
+  "short_name": "SütSihirbazı",
+  "name": "Süt Sihirbazı",
+  "description": "Yapay Zeka Destekli Çiftlik Yönetimi ve Süt Verim Analizi",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#F4F7F6",
+  "theme_color": "#1B5E20",
+  "display": "standalone",
+  "orientation": "portrait"
+}

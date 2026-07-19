@@ -1,10 +1,11 @@
 import './patch-console';
 import React, { useEffect } from 'react';
-import { Platform } from 'react-native';
-import { Stack, router } from "expo-router";
+import { Platform, View, ActivityIndicator } from 'react-native';
+import { Stack, router, useSegments } from "expo-router";
 import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
+import { AuthProvider, useAuth } from '../context/AuthContext';
 
 // Uygulama açıkken (foreground) bildirimlerin nasıl davranacağını belirle
 Notifications.setNotificationHandler({
@@ -92,9 +93,55 @@ async function registerForPushNotificationsAsync() {
 }
 
 export default function RootLayout() {
+  return (
+    <AuthProvider>
+      <RootLayoutNav />
+    </AuthProvider>
+  );
+}
+
+function RootLayoutNav() {
+  const { token, isLoading } = useAuth();
+  const segments = useSegments();
+
+  // PWA Desteği için Service Worker Kayıt İşlemi (Sadece Web platformunda çalışır)
   useEffect(() => {
-    registerForPushNotificationsAsync().then(token => {
-      if (!token) {
+    if (Platform.OS === 'web' && 'serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then((registration) => {
+            console.log('✅ PWA: Service Worker başarıyla kaydedildi:', registration.scope);
+          })
+          .catch((error) => {
+            console.log('❌ PWA: Service Worker kaydı başarısız:', error);
+          });
+      });
+    }
+  }, []);
+
+  // 1. Kimlik Doğrulama Yönlendirme Koruması (Route Guarding)
+  useEffect(() => {
+    if (isLoading) return;
+
+    const firstSegment = segments[0] as string | undefined;
+    const inAuthGroup = firstSegment === 'login' || firstSegment === 'signup';
+
+    if (!token && !inAuthGroup) {
+      // Token yoksa ve kullanıcı login/signup sayfasında değilse login'e at
+      router.replace('/login' as any);
+    } else if (token && inAuthGroup) {
+      // Token varsa ve login/signup sayfasındaysa chat ekranına yönlendir
+      router.replace('/(tabs)/chat' as any);
+    }
+  }, [token, isLoading, segments]);
+
+  // 2. Bildirimler ve Push Token Kayıt İşlemleri
+  useEffect(() => {
+    // Sadece kullanıcı giriş yapmışsa push token'ı kaydet
+    if (!token) return;
+
+    registerForPushNotificationsAsync().then(pushToken => {
+      if (!pushToken) {
         console.log('⚠️ Token alınamadı, backend kayıt atlandı.');
         return;
       }
@@ -110,8 +157,9 @@ export default function RootLayout() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`, // Kullanıcı tokenını ekle
         },
-        body: JSON.stringify({ token }),
+        body: JSON.stringify({ token: pushToken }),
       })
       .then(res => res.json())
       .then(data => console.log('✅ Push Token Backend Kayıt Başarılı:', data))
@@ -159,11 +207,22 @@ export default function RootLayout() {
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [token]);
+
+  if (isLoading) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#F4F7F6' }}>
+        <ActivityIndicator size="large" color="#1B5E20" />
+      </View>
+    );
+  }
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="login" />
+      <Stack.Screen name="signup" />
       <Stack.Screen name="(tabs)" />
     </Stack>
   );
 }
+

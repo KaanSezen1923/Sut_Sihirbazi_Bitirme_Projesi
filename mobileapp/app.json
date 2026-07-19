@@ -13,7 +13,8 @@
       "bundleIdentifier": "com.sutsihirbazi.app",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Süt Sihirbazı'nın sesli komutlarınızı duyması için mikrofona ihtiyacı var.",
-        "NSSpeechRecognitionUsageDescription": "Allow $(PRODUCT_NAME) to use speech recognition."
+        "NSSpeechRecognitionUsageDescription": "Allow $(PRODUCT_NAME) to use speech recognition.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -35,7 +36,15 @@
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/favicon.png",
+      "themeColor": "#1B5E20",
+      "backgroundColor": "#F4F7F6",
+      "name": "Süt Sihirbazı",
+      "shortName": "SütSihirbazı",
+      "description": "Yapay Zeka Destekli Çiftlik Yönetimi ve Süt Verim Analizi",
+      "display": "standalone",
+      "orientation": "portrait",
+      "lang": "tr-TR"
     },
     "plugins": [
       "expo-router",

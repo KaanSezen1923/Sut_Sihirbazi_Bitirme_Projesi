@@ -6,6 +6,7 @@ import {
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import Constants from 'expo-constants';
+import { useAuth } from '../../context/AuthContext';
 
 interface Alarm {
   id: number; kupe_no: string; isim: string; tarih: string;
@@ -32,6 +33,7 @@ const API_URL = getApiUrl();
 
 export default function Dashboard() {
   const router = useRouter();
+  const { token } = useAuth();
   const params = useLocalSearchParams();
   const highlightCow = params.highlight_cow;
   const alertMsg = params.alert_msg;
@@ -46,10 +48,15 @@ export default function Dashboard() {
   const [tableLoading, setTableLoading] = useState(false);
 
   const fetchData = async () => {
+    if (!token) return;
     try {
       const [alarmsRes, summariesRes] = await Promise.all([
-        fetch(`${API_URL}/alarms?unread_only=true`),
-        fetch(`${API_URL}/summaries`),
+        fetch(`${API_URL}/alarms?unread_only=true`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch(`${API_URL}/summaries`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
       ]);
       if (alarmsRes.ok) setAlarms((await alarmsRes.json()).alarms || []);
       if (summariesRes.ok) setSummaries((await summariesRes.json()).summaries || []);
@@ -58,10 +65,12 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 30000);
-    return () => clearInterval(interval);
-  }, []);
+    if (token) {
+      fetchData();
+      const interval = setInterval(fetchData, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [token]);
 
   useEffect(() => {
     if (alertMsg) {
@@ -85,7 +94,9 @@ export default function Dashboard() {
     setModalVisible(true);
     setTableLoading(true);
     try {
-      const res = await fetch(`${API_URL}/cows/daily-change`);
+      const res = await fetch(`${API_URL}/cows/daily-change`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       const data = await res.json();
       if (res.ok && data.success) setCowsDailyData(data.data || []);
     } catch (e) { Alert.alert('Hata', 'Tablo verileri alınamadı.'); }
@@ -95,7 +106,10 @@ export default function Dashboard() {
   const markAlarmAsRead = async (alarmId: number) => {
     try {
       setAlarms((prev) => prev.filter((a) => a.id !== alarmId));
-      await fetch(`${API_URL}/alarms/${alarmId}/read`, { method: 'POST' });
+      await fetch(`${API_URL}/alarms/${alarmId}/read`, { 
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
     } catch (error) { fetchData(); }
   };
 
@@ -105,7 +119,10 @@ export default function Dashboard() {
       type === 'aksam' ? '/simule-data/aksam' :
         type === 'check' ? '/alarms/check' : '/alarms/daily-summary';
     try {
-      const res = await fetch(`${API_URL}${endpoint}`, { method: 'POST' });
+      const res = await fetch(`${API_URL}${endpoint}`, { 
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       const data = await res.json();
       if (res.ok && data.success) {
         Alert.alert('Başarılı', data.message || 'İşlem tamamlandı.');

@@ -1,10 +1,12 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, BackgroundTasks,Depends
 from contextlib import asynccontextmanager
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, List, Dict, Any
+from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from sql_rag import rag_app
 from csv_rag import csv_rag_app
+from tool_rag import toolrag_app
 import uvicorn
 import os
 import tempfile
@@ -15,6 +17,18 @@ from groq import Groq
 from piper import PiperVoice
 from data import sagim_verisi_uret_ve_kaydet
 from alarms import start_scheduler,scheduler
+from passlib.context import CryptContext
+from datetime import datetime, timedelta, timezone
+import jwt
+from fastapi.security import OAuth2PasswordBearer
+
+
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "super-gizli-sut-sihirbazi-anahtari-12345")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 1 Günlük token süresi
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 client = Groq(api_key=os.environ.get("WHISPER_API_KEY"))
 
@@ -41,8 +55,33 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+class SignupRequest(BaseModel):
+    ciftlik_adi: str
+    ad_soyad: str
+    eposta: str
+    sifre: str
+    telefon: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    eposta: str
+    sifre: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    ciftlik_id: int
+    ad_soyad: str
+
 class QueryRequest(BaseModel):
     question: str
+
+
+
+class ToolQueryResponse(BaseModel):
+    answer: str
+    tools_used: List[str] = []
+    tool_outputs: List[Dict[str, Any]] = []
+
 
 class SqlQueryResponse(BaseModel):
     answer: str
@@ -66,6 +105,50 @@ class TtsRequest(BaseModel):
 class PushTokenRequest(BaseModel):
     token: str
 
+def safe_truncate_password(password: str) -> str:
+    """
+    Şifreyi UTF-8 byte formatında güvenli bir şekilde maksimum 70 byte'a keser.
+    C kütüphanelerinin 72 byte / null terminator sınırına takılmasını %100 engeller.
+    """
+    return password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    safe_password = safe_truncate_password(plain_password)
+    return pwd_context.verify(safe_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    safe_password = safe_truncate_password(password)
+    return pwd_context.hash(safe_password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Kimlik bilgileri doğrulanamadı veya token süresi doldu.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        ciftlik_id: int = payload.get("ciftlik_id")
+        
+        if user_id is None or ciftlik_id is None:
+            raise credentials_exception
+            
+        return {"user_id": int(user_id), "ciftlik_id": ciftlik_id, "eposta": payload.get("eposta")}
+    except jwt.PyJWTError:
+        raise credentials_exception
+
 def sse_event(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -76,6 +159,198 @@ def remove_file(path: str):
 @app.get("/")
 def read_root():
     return {"message": "Süt Sihirbazı API Çalışıyor"}
+
+@app.post("/auth/signup", response_model=TokenResponse)
+def signup(request: SignupRequest):
+    print(f"---> GELEN ŞİFRE: '{request.sifre}'")
+    print(f"---> ŞİFRE UZUNLUĞU: {len(request.sifre)} karakter")
+    from alarms import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. E-posta kontrolü
+        cursor.execute("SELECT id FROM kullanicilar WHERE eposta = %s;", (request.eposta,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Bu e-posta adresi ile kayıtlı bir kullanıcı zaten mevcut.")
+        
+        # 2. Önce Çiftliği Oluştur ve ID'sini Al
+        cursor.execute(
+            "INSERT INTO ciftlikler (ciftlik_adi) VALUES (%s) RETURNING id;",
+            (request.ciftlik_adi,)
+        )
+        ciftlik_id = cursor.fetchone()[0]
+        
+        # 3. Şifreyi Hashle ve Kullanıcıyı Kaydet
+        hashed_password = get_password_hash(request.sifre)
+        cursor.execute(
+            """
+            INSERT INTO kullanicilar (ciftlik_id, ad_soyad, eposta, sifre_hash, telefon)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id;
+            """,
+            (ciftlik_id, request.ad_soyad, request.eposta, hashed_password, request.telefon)
+        )
+        user_id = cursor.fetchone()[0]
+        
+        conn.commit()
+        cursor.close()
+        
+        # 4. JWT Token Üret
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(user_id), "ciftlik_id": ciftlik_id, "eposta": request.eposta},
+            expires_delta=access_token_expires
+        )
+        
+        return TokenResponse(
+            access_token=access_token,
+            ciftlik_id=ciftlik_id,
+            ad_soyad=request.ad_soyad
+        )
+
+    except HTTPException:
+        if conn:
+            conn.rollback()
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Kayıt oluşturulurken bir hata oluştu: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(request: LoginRequest):
+    from alarms import get_db_connection
+    from psycopg2.extras import RealDictCursor
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute(
+            "SELECT id, ciftlik_id, ad_soyad, sifre_hash FROM kullanicilar WHERE eposta = %s;",
+            (request.eposta,)
+        )
+        user = cursor.fetchone()
+        cursor.close()
+        
+        if not user or not verify_password(request.sifre, user["sifre_hash"]):
+            raise HTTPException(
+                status_code=401,
+                detail="E-posta adresi veya şifre hatalı.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(user["id"]), "ciftlik_id": user["ciftlik_id"], "eposta": request.eposta},
+            expires_delta=access_token_expires
+        )
+        
+        return TokenResponse(
+            access_token=access_token,
+            ciftlik_id=user["ciftlik_id"],
+            ad_soyad=user["ad_soyad"]
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Giriş yapılırken bir hata oluştu: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+async def tool_query_stream(question: str) -> AsyncGenerator[str, None]:
+    yield sse_event({"step": "☁️ Süt Sihirbazı sorunuzu analiz ediyor...", "done": False})
+    
+    final_answer = ""
+    tools_used = []
+    tool_outputs = []
+    
+    try:
+        # DÜZELTME 1: rag_app yerine toolrag_app kullanıldı!
+        async for output in toolrag_app.astream({"messages": [HumanMessage(content=question)]}, stream_mode="updates"):
+            for node_name, state_update in output.items():
+                messages = state_update.get("messages", [])
+                if not messages:
+                    continue
+                last_msg = messages[-1]
+                
+                if node_name == "router":
+                    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                        tool_names = [tc["name"] for tc in last_msg.tool_calls]
+                        yield sse_event({"step": f"🛠️ Gerekli araçlar tetikleniyor: {', '.join(tool_names)}", "done": False})
+                    else:
+                        final_answer = last_msg.content
+                        
+                elif node_name == "tools":
+                    for tool_msg in messages:
+                        if isinstance(tool_msg, ToolMessage):
+                            tools_used.append(tool_msg.name)
+                            tool_outputs.append({"tool": tool_msg.name, "output": tool_msg.content})
+                            yield sse_event({"step": f"✅ Veri çekildi: {tool_msg.name}", "done": False})
+                            
+                elif node_name == "summarizer":
+                    yield sse_event({"step": "🔒 Gizlilik Kalkanı (Yerel Model) verileri yorumluyor...", "done": False})
+                    final_answer = last_msg.content
+                    
+                elif node_name == "generate_general_answer":
+                    yield sse_event({"step": "☁️ Genel sohbet yanıtı hazırlanıyor...", "done": False})
+                    final_answer = last_msg.content
+                    
+    except Exception as e:
+        print(f"Graph çalışma hatası: {e}")
+        yield sse_event({"step": "Bir hata oluştu...", "done": True, "answer": f"Üzgünüm, bir hata oluştu: {str(e)}"})
+        return
+
+    yield sse_event({
+        "done": True,
+        "answer": final_answer or "Yanıt oluşturulamadı.",
+        "tools_used": tools_used,
+        "tool_outputs": tool_outputs
+    })
+
+# DÜZELTME 2: EKSİK OLAN STREAMING ENDPOINT ROTA TANIMI EKLENDİ!
+@app.post("/query/tool/stream")
+async def process_tool_query_stream(request: QueryRequest, current_user: dict = Depends(get_current_user)):
+    """Yeni LangGraph araç ajanını (Tool RAG) streaming olarak çalıştırır."""
+    return StreamingResponse(
+        tool_query_stream(request.question),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no", 
+        }
+    )
+
+@app.post("/query/tool/", response_model=ToolQueryResponse)
+def process_tool_query(request: QueryRequest, current_user: dict = Depends(get_current_user)):
+    """Streaming olmayan standart istekler için Tool RAG endpointi."""
+    state = {"messages": [HumanMessage(content=request.question)]}
+    
+    # DÜZELTME 3: Burada da rag_app yerine toolrag_app kullanıldı!
+    final_state = toolrag_app.invoke(state)
+    
+    messages = final_state["messages"]
+    last_message = messages[-1].content
+    
+    tools_used = []
+    tool_outputs = []
+    
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            tools_used.append(msg.name)
+            tool_outputs.append({"tool": msg.name, "output": msg.content})
+            
+    return ToolQueryResponse(
+        answer=last_message,
+        tools_used=tools_used,
+        tool_outputs=tool_outputs
+    )
 
 # === SQL RAG ENDPOINTLERİ ===
 async def sql_query_stream(question: str) -> AsyncGenerator[str, None]:
@@ -112,7 +387,7 @@ async def sql_query_stream(question: str) -> AsyncGenerator[str, None]:
     })
 
 @app.post("/query/sql/stream")
-async def process_query_stream(request: QueryRequest):
+async def process_query_stream(request: QueryRequest, current_user: dict = Depends(get_current_user)):
     return StreamingResponse(
         sql_query_stream(request.question),
         media_type="text/event-stream",
@@ -123,7 +398,7 @@ async def process_query_stream(request: QueryRequest):
     )
 
 @app.post("/query/sql/")
-def process_query(request: QueryRequest):
+def process_query(request: QueryRequest, current_user: dict = Depends(get_current_user)):
     state = {"question": request.question}
     final_state = rag_app.invoke(state)
     return {
@@ -160,7 +435,7 @@ async def csv_query_stream(question: str) -> AsyncGenerator[str, None]:
     })
 
 @app.post("/query/csv/stream")
-async def process_csv_query_stream(request: QueryRequest):
+async def process_csv_query_stream(request: QueryRequest, current_user: dict = Depends(get_current_user)):
     return StreamingResponse(
         csv_query_stream(request.question),
         media_type="text/event-stream",
@@ -171,7 +446,7 @@ async def process_csv_query_stream(request: QueryRequest):
     )
 
 @app.post("/query/csv/")
-def process_csv_query(request: QueryRequest):
+def process_csv_query(request: QueryRequest, current_user: dict = Depends(get_current_user)):
     state = {"question": request.question}
     final_state = csv_rag_app.invoke(state)
     return {
@@ -183,7 +458,7 @@ def process_csv_query(request: QueryRequest):
 
 # === SES ENDPOINTLERİ ===
 @app.post("/transcribe", response_model=TranscriptionResponse)
-async def transcribe_audio(audio: UploadFile = File(...)):
+async def transcribe_audio(audio: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     temp_file_path = None
     try:
         file_ext = os.path.splitext(audio.filename)[1].lower()
@@ -214,7 +489,7 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             os.remove(temp_file_path)
 
 @app.get("/tts")
-async def text_to_speech(text: str, background_tasks: BackgroundTasks):
+async def text_to_speech(text: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     if voice is None:
         raise HTTPException(status_code=500, detail="TTS modeli aktif değil. Lütfen sunucu loglarını kontrol edin.")
 
@@ -243,7 +518,7 @@ async def text_to_speech(text: str, background_tasks: BackgroundTasks):
 
 # === ALARM & AJANDA ENDPOINTLERİ ===
 @app.post("/register-token")
-def register_push_token(request: PushTokenRequest):
+def register_push_token(request: PushTokenRequest, current_user: dict = Depends(get_current_user)):
     token = request.token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token boş olamaz.")
@@ -268,7 +543,7 @@ def register_push_token(request: PushTokenRequest):
             conn.close()
 
 @app.post("/alarms/check")
-def trigger_alarm_check():
+def trigger_alarm_check(current_user: dict = Depends(get_current_user)):
     from alarms import check_for_milk_drops
     try:
         new_alarms = check_for_milk_drops()
@@ -280,7 +555,7 @@ def trigger_alarm_check():
         raise HTTPException(status_code=500, detail=f"Analiz sırasında hata oluştu: {e}")
 
 @app.post("/alarms/daily-summary")
-def trigger_daily_summary():
+def trigger_daily_summary(current_user: dict = Depends(get_current_user)):
     from alarms import generate_daily_summary
     try:
         summary_msg = generate_daily_summary()
@@ -299,7 +574,7 @@ def trigger_daily_summary():
         raise HTTPException(status_code=500, detail=f"Özet üretilirken hata oluştu: {e}")
 
 @app.get("/alarms")
-def get_alarms(unread_only: bool = False):
+def get_alarms(unread_only: bool = False, current_user: dict = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -346,7 +621,7 @@ def get_alarms(unread_only: bool = False):
 
 # YENİ ENDPOINT: Sadece Günlük Özetleri Getirir
 @app.get("/summaries")
-def get_summaries():
+def get_summaries(current_user: dict = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -382,7 +657,7 @@ def get_summaries():
             conn.close()
 
 @app.post("/alarms/{alarm_id}/read")
-def mark_alarm_as_read(alarm_id: int):
+def mark_alarm_as_read(alarm_id: int, current_user: dict = Depends(get_current_user)):
     from alarms import get_db_connection
     conn = None
     try:
@@ -406,7 +681,7 @@ def mark_alarm_as_read(alarm_id: int):
             conn.close()
 
 @app.post("/simule-data/sabah")
-def simule_data_sabah():
+def simule_data_sabah(current_user: dict = Depends(get_current_user)):
     try:
         sagim_verisi_uret_ve_kaydet("m")
         return {"success": True, "message": "Sabah verileri başarıyla üretildi."}
@@ -414,7 +689,7 @@ def simule_data_sabah():
         raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
 
 @app.post("/simule-data/aksam")
-def simule_data_aksam():
+def simule_data_aksam(current_user: dict = Depends(get_current_user)):
     try:
         sagim_verisi_uret_ve_kaydet("e")
         return {"success": True, "message": "Akşam verileri başarıyla üretildi."}
@@ -422,7 +697,7 @@ def simule_data_aksam():
         raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
 
 @app.get("/cows/daily-change")
-def get_cows_daily_change():
+def get_cows_daily_change(current_user: dict = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -485,7 +760,7 @@ def get_cows_daily_change():
         if conn:
             conn.close()
 @app.get("/cows")
-def get_cows():
+def get_cows(current_user: dict = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -536,7 +811,7 @@ def get_cows():
             conn.close()
 
 @app.get("/stats/farm")
-def get_farm_stats():
+def get_farm_stats(days: int = 10, current_user: dict = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -544,14 +819,15 @@ def get_farm_stats():
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
+        # LIMIT kısmını dinamik hale getirdik
         query = """
         SELECT tarih, ROUND(SUM(sut_miktari)::numeric, 1) as toplam_sut
         FROM sagim_kayitlari
         GROUP BY tarih
         ORDER BY tarih DESC
-        LIMIT 10;
+        LIMIT %s;
         """
-        cursor.execute(query)
+        cursor.execute(query, (days,))
         rows = cursor.fetchall()
         cursor.close()
         
@@ -569,7 +845,7 @@ def get_farm_stats():
             conn.close()
 
 @app.get("/cows/{kupe_no}/stats")
-def get_cow_stats(kupe_no: str):
+def get_cow_stats(kupe_no: str, current_user: dict = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None

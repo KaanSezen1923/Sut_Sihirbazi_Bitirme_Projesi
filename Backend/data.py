@@ -81,6 +81,23 @@ def gecmis_istatistikleri_getir():
     
     return istatistikler, kupeler[:INEK_SAYISI]
 
+def inek_ciftlik_eslesmelerini_getir():
+    """
+    YENİ EKLENEN FONKSİYON:
+    'inekler' tablosundan her ineğin hangi çiftliğe ait olduğunu (ciftlik_id) çeker.
+    Böylece sağım kaydı atılırken ineğin gerçek çiftlik ID'si eşleştirilir.
+    """
+    ciftlik_haritasi = {}
+    try:
+        with engine.connect() as conn:
+            query = text("SELECT kupe_no, ciftlik_id FROM inekler;")
+            sonuc = conn.execute(query).fetchall()
+            for kupe, c_id in sonuc:
+                ciftlik_haritasi[kupe] = c_id if c_id is not None else 1
+    except Exception as e:
+        logging.warning(f"İnek-Çiftlik eşleşmesi çekilemedi, varsayılan (ciftlik_id=1) kullanılacak: {e}")
+    return ciftlik_haritasi
+
 def yeni_id_getir():
     with engine.connect() as conn:
         sonuc = conn.execute(text("SELECT COALESCE(MAX(id), 0) + 1 FROM sagim_kayitlari"))
@@ -91,6 +108,9 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
     
     istatistikler, kupeler = gecmis_istatistikleri_getir()
     baslangic_id = yeni_id_getir()
+    
+    # YENİ: İneklerin bağlı olduğu çiftlik ID'lerini veritabanından getiriyoruz
+    ciftlik_haritasi = inek_ciftlik_eslesmelerini_getir()
 
     sagim_adi = "SABAH (11:30)" if sagim_zamani == "m" else "AKŞAM (19:00)"
     logging.info(f"--- [{bugun}] {sagim_adi} SAĞIMI BAŞLADI --- {INEK_SAYISI} İnek sağılıyor...")
@@ -113,6 +133,9 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
             logging.warning(f"🚨 ANOMALİ TETİKLENDİ! İnek: {kupe} | Beklenen veriminin ({mean:.1f}L) %{int(dusus_orani*100)} altında verdi!")
 
         sut = max(0.5, round(sut, 2))
+        
+        # YENİ: İneğin ciftlik_id bilgisini haritadan al (yeni üretilen inekse varsayılan olarak 1 ata)
+        ciftlik_id = ciftlik_haritasi.get(kupe, 1)
 
         yeni_kayitlar.append({
             "id": baslangic_id + idx,
@@ -120,10 +143,11 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
             "tarih": bugun,
             "sagim_zamani": sagim_zamani,
             "sut_miktari": sut,
+            "ciftlik_id": ciftlik_id,  # <-- YENİ EKLENEN ALAN
         })
     # --- FOR DÖNGÜSÜ BURADA BİTTİ ---
 
-    # 2. ADIM: Döngü bittikten sonra (4 boşluk geriye alındı) toplu kaydetme yapılır
+    # 2. ADIM: Döngü bittikten sonra toplu kaydetme yapılır
     df_yeni = pd.DataFrame(yeni_kayitlar)
         
     try:
@@ -138,7 +162,6 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
         logging.info(f"[BAŞARILI] {len(df_yeni)} adet {sagim_adi} sağım kaydı veritabanına işlendi.")
 
         # --- YENİ EKLENEN OTOMATİK TETİKLEYİCİ BÖLÜMÜ ---
-        # Circular import hatasını önlemek için import işlemini burada yapıyoruz:
         from alarms import check_for_milk_drops, generate_daily_summary
         
         # 1. Veri kaydı başarılı olur olmaz ANOMALİ TESPİTİ çalıştırılır (Sabah & Akşam)

@@ -21,6 +21,7 @@ import { Audio } from 'expo-av';
 import { StepIndicator } from '../../components/StepIndicator';
 import Constants from 'expo-constants';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useAuth } from '../../context/AuthContext';
 
 interface Message {
   id: string;
@@ -94,6 +95,7 @@ const markdownRules: RenderRules = {
 
 export default function Chat() {
   const router = useRouter();
+  const { token } = useAuth();
   const params = useLocalSearchParams();
   const queryParam = params.query;
 
@@ -140,8 +142,11 @@ export default function Chat() {
 
   // OKUNMAMIŞ ALARMLARI ÇEK (7/24 Gözcü Bağlantısı)
   const fetchUnreadAlarms = async () => {
+    if (!token) return;
     try {
-      const res = await fetch(`${API_URL}/alarms?unread_only=true`);
+      const res = await fetch(`${API_URL}/alarms?unread_only=true`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.success) setUnreadAlarms(data.alarms || []);
@@ -185,7 +190,10 @@ export default function Chat() {
       setSpeakingId(messageId);
       await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
       const ttsUrl = `${API_URL}/tts?text=${encodeURIComponent(text)}`;
-      const { sound } = await Audio.Sound.createAsync({ uri: ttsUrl }, { shouldPlay: true });
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: ttsUrl, headers: { 'Authorization': `Bearer ${token}` } },
+        { shouldPlay: true }
+      );
       soundRef.current = sound;
       sound.setOnPlaybackStatusUpdate((status) => {
         if (status.isLoaded && status.didJustFinish) {
@@ -240,9 +248,12 @@ export default function Chat() {
     const startTime = Date.now();
 
     try {
-      const es = new EventSource(`${API_URL}/query/sql/stream`, {
+      const es = new EventSource(`${API_URL}/query/tool/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({ question: finalQuery }),
       });
 
@@ -335,7 +346,14 @@ export default function Chat() {
     try {
       const formData = new FormData();
       formData.append('audio', { uri: audioUri, type: 'audio/m4a', name: 'recording.m4a' } as any);
-      const transcribeResponse = await fetch(`${API_URL}/transcribe`, { method: 'POST', body: formData, headers: { 'Content-Type': 'multipart/form-data' } });
+      const transcribeResponse = await fetch(`${API_URL}/transcribe`, { 
+        method: 'POST', 
+        body: formData, 
+        headers: { 
+          'Content-Type': 'multipart/form-data',
+          'Authorization': `Bearer ${token}`
+        } 
+      });
       const transcribeData = await transcribeResponse.json();
       const userText = transcribeData.transcription || transcribeData.text;
       if (!userText) throw new Error('Ses anlaşılamadı');
@@ -350,7 +368,14 @@ export default function Chat() {
       ]);
 
       setCurrentStep('Sorunuz analiz ediliyor...');
-      const es = new EventSource(`${API_URL}/query/sql/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: userText }) });
+      const es = new EventSource(`${API_URL}/query/tool/stream`, { 
+        method: 'POST', 
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        }, 
+        body: JSON.stringify({ question: userText }) 
+      });
       activeEventSourceRef.current = es;
 
       es.addEventListener('message', (event) => {
@@ -664,7 +689,7 @@ const styles = StyleSheet.create({
   bellButton: { padding: 4, position: 'relative' },
   bellBadge: { position: 'absolute', top: 2, right: 2, backgroundColor: '#D32F2F', borderRadius: 10, minWidth: 18, height: 18, justifyContent: 'center', alignItems: 'center', borderWidth: 1.5, borderColor: '#fff' },
   bellBadgeText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
-  
+
   // AÇILIR ZİL MENÜSÜ STİLLERİ
   dropdownContainer: { position: 'absolute', top: 56, right: 16, left: 16, backgroundColor: '#ffffff', borderRadius: 16, borderWidth: 1, borderColor: '#E0E8E0', padding: 12, zIndex: 100, elevation: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 10 },
   dropdownHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#F1F8E9', marginBottom: 8 },

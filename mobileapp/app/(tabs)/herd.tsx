@@ -6,6 +6,7 @@ import {
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
+import { useAuth } from '../../context/AuthContext';
 
 interface Cow { kupe_no: string; isim: string; ortalama_sut: number; son_sut: number; durum: 'Sağlıklı' | 'Riskli'; }
 interface CowStats { dates: string[]; yields: number[]; }
@@ -20,6 +21,7 @@ const API_URL = getApiUrl();
 
 export default function Herd() {
   const router = useRouter();
+  const { token } = useAuth();
   const [cows, setCows] = useState<Cow[]>([]);
   const [filteredCows, setFilteredCows] = useState<Cow[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -30,8 +32,11 @@ export default function Herd() {
   const [statsLoading, setStatsLoading] = useState(false);
 
   const fetchCows = async () => {
+    if (!token) return;
     try {
-      const res = await fetch(`${API_URL}/cows`);
+      const res = await fetch(`${API_URL}/cows`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.cows) {
@@ -44,9 +49,12 @@ export default function Herd() {
   };
 
   const fetchCowStats = async (kupeNo: string) => {
+    if (!token) return;
     setStatsLoading(true);
     try {
-      const res = await fetch(`${API_URL}/cows/${kupeNo}/stats`);
+      const res = await fetch(`${API_URL}/cows/${kupeNo}/stats`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.success) setCowStats({ dates: data.dates || [], yields: data.yields || [] });
@@ -55,7 +63,11 @@ export default function Herd() {
     finally { setStatsLoading(false); }
   };
 
-  useEffect(() => { fetchCows(); }, []);
+  useEffect(() => {
+    if (token) {
+      fetchCows();
+    }
+  }, [token]);
 
   const filterCows = (allCows: Cow[], query: string) => {
     if (!query) { setFilteredCows(allCows); return; }
