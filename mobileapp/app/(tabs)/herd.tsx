@@ -5,23 +5,14 @@ import {
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import Constants from 'expo-constants';
 import { useAuth } from '../../context/AuthContext';
 
 interface Cow { kupe_no: string; isim: string; ortalama_sut: number; son_sut: number; durum: 'Sağlıklı' | 'Riskli'; }
 interface CowStats { dates: string[]; yields: number[]; }
 
-const getApiUrl = () => {
-  const hostUri = Constants.expoConfig?.hostUri;
-  if (hostUri) return `http://${hostUri.split(':')[0]}:8000`;
-  return `http://localhost:8000`;
-};
-
-const API_URL = getApiUrl();
-
 export default function Herd() {
   const router = useRouter();
-  const { token } = useAuth();
+  const { token, apiFetch } = useAuth();
   const [cows, setCows] = useState<Cow[]>([]);
   const [filteredCows, setFilteredCows] = useState<Cow[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -34,9 +25,7 @@ export default function Herd() {
   const fetchCows = async () => {
     if (!token) return;
     try {
-      const res = await fetch(`${API_URL}/cows`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await apiFetch('/cows');
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.cows) {
@@ -52,9 +41,7 @@ export default function Herd() {
     if (!token) return;
     setStatsLoading(true);
     try {
-      const res = await fetch(`${API_URL}/cows/${kupeNo}/stats`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await apiFetch(`/cows/${kupeNo}/stats`);
       if (res.ok) {
         const data = await res.json();
         if (data.success) setCowStats({ dates: data.dates || [], yields: data.yields || [] });

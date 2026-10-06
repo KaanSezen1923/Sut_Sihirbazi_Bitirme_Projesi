@@ -21,11 +21,11 @@ try:
     port = os.getenv("DB_PORT", 5432)
     veritabani_adi = os.getenv("DB_NAME", "Sut_Sihirbazi")
     
-    VERITABANI_URL = f"postgresql://{user}:{password}@{host}:{port}/{veritabani_adi}"
-    VERITABANI_URL2 = f"postgresql://{user}:{password}@{host}:{port}/Sut_Sihirbazi_Real"
+
+    VERITABANI_URL = f"postgresql://{user}:{password}@{host}:{port}/Sut_Sihirbazi_Real"
     
+
     engine = create_engine(VERITABANI_URL)
-    engine2 = create_engine(VERITABANI_URL2)
 
 except Exception as e:
     logging.error(f"Veritabanı bağlantısı oluşturulamadı: {e}")
@@ -50,7 +50,7 @@ def gecmis_istatistikleri_getir():
     Böylece 2026 verileri ineğin geçmiş performansına sadık kalır.
     """
     istatistikler = {}
-    with engine2.connect() as conn:
+    with engine.connect() as conn:
         query = text("""
             SELECT kupe_no, sagim_zamani, 
                    AVG(sut_miktari) as ortalama, 
@@ -105,6 +105,7 @@ def yeni_id_getir():
 
 def sagim_verisi_uret_ve_kaydet(sagim_zamani):
     bugun = date.today().strftime("%Y-%m-%d")
+    
     
     istatistikler, kupeler = gecmis_istatistikleri_getir()
     baslangic_id = yeni_id_getir()
@@ -179,3 +180,11 @@ def sagim_verisi_uret_ve_kaydet(sagim_zamani):
         return
 
     logging.info("Bir sonraki zamanlanmış sağım saati bekleniyor...\n" + "=" * 50)
+
+if __name__ == "__main__":
+    
+    sagim_verisi_uret_ve_kaydet("m")
+    sagim_verisi_uret_ve_kaydet("e")
+    
+
+    

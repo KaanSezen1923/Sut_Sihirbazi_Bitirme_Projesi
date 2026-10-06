@@ -69,13 +69,18 @@
         }
       ],
       [
-        "@react-native-voice/voice",
+        "expo-speech-recognition",
         {
           "microphonePermission": "Süt Sihirbazı sesinizi duymak için izin istiyor.",
-          "speechRecognitionPermission": "Süt Sihirbazı konuşmanızı metne çevirmek için izin istiyor."
+          "speechRecognitionPermission": "Süt Sihirbazı konuşmanızı metne çevirmek için izin istiyor.",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
         }
       ],
-      "expo-speech-recognition"
+      "expo-font",
+      "expo-web-browser",
+      "expo-image",
+      "expo-status-bar",
+      "expo-audio"
     ],
     "experiments": {
       "typedRoutes": true,

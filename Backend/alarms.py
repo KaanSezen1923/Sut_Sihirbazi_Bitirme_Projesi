@@ -3,7 +3,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
-from exponent_server_sdk import PushClient, PushMessage
+from exponent_server_sdk import PushClient, PushMessage, DeviceNotRegisteredError
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from zoneinfo import ZoneInfo
@@ -37,22 +37,33 @@ def get_db_connection():
         port=5432
     )
 
-def send_push_notification(title: str, body: str, data: dict = None):
-    """Kayıtlı tüm cihaz token'larına push bildirimi gönderir."""
+def send_push_notification(title: str, body: str, data: dict = None, ciftlik_id: int = None):
+    """
+    Push bildirimini YALNIZCA ilgili çiftliğe kayıtlı cihaz token'larına gönderir.
+    ciftlik_id verilmezse data["ciftlik_id"] kullanılır; ikisi de yoksa hiçbir şey gönderilmez
+    (başka çiftliklerin cihazlarına yanlışlıkla bildirim gitmesini önlemek için).
+    """
+    if ciftlik_id is None and data:
+        ciftlik_id = data.get("ciftlik_id")
+    if ciftlik_id is None:
+        print("⚠️ ciftlik_id belirtilmediği için push bildirimi gönderilmedi.")
+        return
+
     conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT token FROM cihaz_tokenlari;")
+        cursor.execute("SELECT token FROM cihaz_tokenlari WHERE ciftlik_id = %s;", (ciftlik_id,))
         tokens = cursor.fetchall()
         cursor.close()
         
         if not tokens:
-            print("Bildirim gönderilecek kayıtlı push token bulunamadı.")
+            print(f"Çiftlik #{ciftlik_id} için kayıtlı push token bulunamadı.")
             return
 
         client = PushClient()
         basarili_sayisi = 0
+        gecersiz_tokenlar = []
         
         for (token,) in tokens:
             if not (token.startswith("ExponentPushToken") or token.startswith("ExpoPushToken")):
@@ -64,7 +75,7 @@ def send_push_notification(title: str, body: str, data: dict = None):
                 if data:
                     notification_data.update(data)
 
-                client.publish(
+                ticket = client.publish(
                     PushMessage(
                         to=token,
                         title=title,
@@ -75,12 +86,24 @@ def send_push_notification(title: str, body: str, data: dict = None):
                         data=notification_data
                     )
                 )
+                # publish() Expo'nun reddettiği mesajlarda hata fırlatmaz;
+                # ticket doğrulanmazsa hatalar sessizce "başarılı" sayılır.
+                ticket.validate_response()
                 basarili_sayisi += 1
+            except DeviceNotRegisteredError:
+                print(f"🗑️ Geçersiz/silinmiş cihaz token'ı kaldırılıyor: {token}")
+                gecersiz_tokenlar.append(token)
             except Exception as e:
                 print(f"❌ '{token}' cihazına bildirim gönderilirken hata oluştu: {e}")
+
+        if gecersiz_tokenlar:
+            cleanup = conn.cursor()
+            cleanup.execute("DELETE FROM cihaz_tokenlari WHERE token = ANY(%s);", (gecersiz_tokenlar,))
+            conn.commit()
+            cleanup.close()
                 
         if basarili_sayisi > 0:
-            print(f"✅ Toplam {basarili_sayisi} cihaza push bildirimi başarıyla gönderildi.")
+            print(f"✅ Toplam {basarili_sayisi} cihaza push bildirimi Expo tarafından kabul edildi.")
             
     except Exception as e:
         print(f"❌ Veritabanı veya Push bildirim genel hatası: {e}")
@@ -88,9 +111,10 @@ def send_push_notification(title: str, body: str, data: dict = None):
         if conn:
             conn.close()
 
-def check_for_milk_drops():
+def check_for_milk_drops(ciftlik_id: int = None):
     """
-    Tüm ineklerin son sağım kayıtlarını analiz eder. 
+    İneklerin son sağım kayıtlarını analiz eder. ciftlik_id verilirse yalnızca o çiftliğin,
+    verilmezse (zamanlayıcı) tüm çiftliklerin ineklerine bakar.
     Eğer bir ineğin son sağımı, önceki 3 sağım ortalamasına kıyasla %20 veya daha fazla düşmüşse
     ineğin bağlı olduğu ciftlik_id ile birlikte alarm oluşturur.
     """
@@ -102,58 +126,64 @@ def check_for_milk_drops():
         
         # YENİ: inekler tablosundan (i.ciftlik_id) çekildi, null ise 1 varsayıldı
         query = """
-        WITH son_kayitlar AS (
-            SELECT DISTINCT ON (kupe_no)
-                id,
-                kupe_no,
-                tarih,
-                sagim_zamani,
-                sut_miktari
-            FROM sagim_kayitlari
-            ORDER BY kupe_no, tarih DESC, id DESC
-        ),
-        gecmis_ortalamalar AS (
-            SELECT
-                sk.kupe_no,
-                AVG(sk_eski.sut_miktari) AS ortalama_sut
-            FROM son_kayitlar sk
-            JOIN LATERAL (
-                SELECT sut_miktari
+            WITH son_kayitlar AS (
+                SELECT DISTINCT ON (kupe_no, sagim_zamani)
+                    id, kupe_no, tarih, sagim_zamani, sut_miktari
                 FROM sagim_kayitlari
-                WHERE kupe_no = sk.kupe_no
-                  AND id < sk.id
-                  AND sagim_zamani = sk.sagim_zamani
-                ORDER BY tarih DESC, id DESC
-                LIMIT 3
-            ) sk_eski ON TRUE
-            GROUP BY sk.kupe_no
-        )
-        SELECT
-            i.isim,
-            sk.kupe_no,
-            sk.tarih,
-            sk.sagim_zamani,
-            sk.sut_miktari AS son_verim,
-            go.ortalama_sut AS eski_ortalama,
-            ROUND(((go.ortalama_sut - sk.sut_miktari) / go.ortalama_sut) * 100, 2) AS dusus_yuzdesi,
-            COALESCE(i.ciftlik_id, 1) AS ciftlik_id
-        FROM son_kayitlar sk
-        JOIN gecmis_ortalamalar go ON sk.kupe_no = go.kupe_no
-        JOIN inekler i ON sk.kupe_no = i.kupe_no
-        WHERE go.ortalama_sut > 0
-          AND sk.sut_miktari < go.ortalama_sut * 0.8; 
+                WHERE tarih >= CURRENT_DATE - INTERVAL '3 days'
+                AND sut_miktari IS NOT NULL
+                ORDER BY kupe_no, sagim_zamani, tarih DESC, id DESC
+            ),
+            gecmis_ortalamalar AS (
+                SELECT
+                    sk.kupe_no,
+                    sk.sagim_zamani,
+                    AVG(e.sut_miktari) AS ortalama_sut,
+                    COUNT(*)           AS ornek_sayisi
+                FROM son_kayitlar sk
+                CROSS JOIN LATERAL (
+                    SELECT sut_miktari
+                    FROM sagim_kayitlari
+                    WHERE kupe_no = sk.kupe_no
+                    AND sagim_zamani = sk.sagim_zamani
+                    AND sut_miktari IS NOT NULL
+                    AND (tarih, id) < (sk.tarih, sk.id)
+                    AND tarih >= sk.tarih - INTERVAL '21 days'
+                    ORDER BY tarih DESC, id DESC
+                    LIMIT 14
+                ) e
+                GROUP BY sk.kupe_no, sk.sagim_zamani
+                HAVING COUNT(*) >= 7
+            )
+            SELECT
+                i.isim,
+                sk.kupe_no,
+                sk.tarih,
+                sk.sagim_zamani,
+                sk.sut_miktari AS son_verim,
+                ROUND(go.ortalama_sut, 2) AS eski_ortalama,
+                ROUND((go.ortalama_sut - sk.sut_miktari) / go.ortalama_sut * 100, 2) AS dusus_yuzdesi,
+                go.ornek_sayisi,
+                i.ciftlik_id
+            FROM son_kayitlar sk
+            JOIN gecmis_ortalamalar go USING (kupe_no, sagim_zamani)
+            JOIN inekler i ON i.kupe_no = sk.kupe_no
+            WHERE go.ortalama_sut > 0
+            AND sk.sut_miktari < go.ortalama_sut * 0.8
+            AND (%(cid)s::int IS NULL OR i.ciftlik_id = %(cid)s);
         """
         
-        cursor.execute(query)
+        cursor.execute(query, {"cid": ciftlik_id})
         anomalies = cursor.fetchall()
         
         new_alarms_count = 0
+        pending_pushes = []  # (title, mesaj, data) -> DB commit edildikten sonra gönderilir
         
         for anomaly in anomalies:
             kupe_no = anomaly["kupe_no"]
             tarih = anomaly["tarih"]
             sagim_zamani = anomaly["sagim_zamani"]
-            ciftlik_id = anomaly["ciftlik_id"]  # <-- YENİ EKLENEN ALAN
+            alarm_ciftlik_id = anomaly["ciftlik_id"]
             
             cursor.execute(
                 "SELECT id FROM alarmlar WHERE kupe_no = %s AND tarih = %s AND sagim_zamani = %s;",
@@ -168,7 +198,7 @@ def check_for_milk_drops():
                 dusus_yuzdesi = float(anomaly["dusus_yuzdesi"])
                 sagim_zamani_tr = "Sabah" if sagim_zamani == 'm' else "Akşam"
                 
-                print(f"[{kupe_no} - Çiftlik #{ciftlik_id}] - {isim} için anomali tespit edildi. LLM'den mesaj üretiliyor...")
+                print(f"[{kupe_no} - Çiftlik #{alarm_ciftlik_id}] - {isim} için anomali tespit edildi. LLM'den mesaj üretiliyor...")
 
                 prompt_template = """
                 Sen, çiftçilere yardım eden neşeli ve akıllı yapay zeka asistanı **Süt Sihirbazı**'sın.
@@ -182,7 +212,10 @@ def check_for_milk_drops():
                 Önceki 3 Sağımın Ortalaması: {eski_ortalama:.1f} litre
                 Düşüş Yüzdesi: %{dusus_yuzdesi:.1f}
 
-                Lütfen sadece oluşturduğun alarm mesajını döndür, başka hiçbir şey yazma.
+                KURALLAR:
+                1. KESİNLİKLE hiçbir hayali kişi veya çiftçi ismi (örn: 'Mehmet Bey', 'Tarhan Bey', 'Ahmet Bey' vb.) UYDURMA ve KULLANMA. Çiftçinin adını bilmiyorsun.
+                2. Selamlama yapacaksan sadece 'Merhaba!', 'Merhaba Çiftçim!' veya 'Merhaba Değerli Üreticimiz!' gibi genel bir ifade kullan ya da doğrudan ineğin adıyla konuya başla.
+                3. Lütfen sadece oluşturduğun alarm mesajını döndür, tırnak işareti, başlık veya ek açıklama yazma.
                 """
                 
                 prompt = ChatPromptTemplate.from_template(prompt_template)
@@ -207,22 +240,39 @@ def check_for_milk_drops():
                 cursor.execute(
                     """
                     INSERT INTO alarmlar (ciftlik_id, kupe_no, tarih, sagim_zamani, eski_ortalama, son_verim, dusus_yuzdesi, mesaj)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id;
                     """,
-                    (ciftlik_id, kupe_no, tarih, sagim_zamani, eski_ortalama, son_verim, dusus_yuzdesi, mesaj)
+                    (alarm_ciftlik_id, kupe_no, tarih, sagim_zamani, eski_ortalama, son_verim, dusus_yuzdesi, mesaj)
                 )
+                alarm_id = cursor.fetchone()["id"]
                 new_alarms_count += 1
                 
                 print(f"[{kupe_no}] - Alarm başarıyla oluşturuldu ve veritabanına eklendi.")
 
                 title = f"🚨 {isim} İçin Süt Alarmı!"
-                send_push_notification(title, mesaj, data={"highlight_cow": kupe_no, "alert_msg": mesaj, "ciftlik_id": ciftlik_id})
+                pending_pushes.append((
+                    title,
+                    mesaj,
+                    {
+                        "alarm_id": alarm_id,
+                        "kupe_no": kupe_no,
+                        "mesaj": mesaj,
+                        "highlight_cow": kupe_no,
+                        "alert_msg": mesaj,
+                        "ciftlik_id": alarm_ciftlik_id,
+                    },
+                ))
             else:
                 print(f"[{kupe_no}] - {tarih} ({sagim_zamani}) zamanlı alarm zaten veritabanında mevcut, atlandı.")
         
         if new_alarms_count > 0:
             conn.commit()
             print(f"Analiz tamamlandı. {new_alarms_count} yeni alarm oluşturuldu ve kaydedildi.")
+            # Alarmlar kalıcı hale geldikten sonra bildir; böylece uygulama push'a
+            # tıklayınca /alarms içinde ilgili kaydı her zaman bulur.
+            for p_title, p_body, p_data in pending_pushes:
+                send_push_notification(p_title, p_body, data=p_data, ciftlik_id=p_data["ciftlik_id"])
         else:
             print("Analiz tamamlandı. Yeni süt düşüş alarmı bulunamadı.")
             
@@ -235,8 +285,9 @@ def check_for_milk_drops():
         if conn:
             conn.close()
 
-def generate_daily_summary():
+def generate_daily_summary(ciftlik_id: int = None):
     """
+    ciftlik_id verilirse yalnızca o çiftlik için çalışır; verilmezse tüm çiftlikler için.
     Günlük toplam süt üretimini dünün üretimiyle kıyaslar, günün en verimli ineğini tespit eder.
     Bunu o gün sağım yapılan HER ÇİFTLİK İÇİN ayrı ayrı hesaplayıp ciftlik_id ile kaydeder.
     """
@@ -246,7 +297,10 @@ def generate_daily_summary():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute("SELECT MAX(tarih) FROM sagim_kayitlari;")
+        if ciftlik_id is not None:
+            cursor.execute("SELECT MAX(tarih) FROM sagim_kayitlari WHERE COALESCE(ciftlik_id, 1) = %s;", (ciftlik_id,))
+        else:
+            cursor.execute("SELECT MAX(tarih) FROM sagim_kayitlari;")
         latest_date_row = cursor.fetchone()
         if not latest_date_row or not latest_date_row[0]:
             print("Veritabanında sağım kaydı bulunamadı.")
@@ -254,10 +308,13 @@ def generate_daily_summary():
         today_date = latest_date_row[0]
         
         # YENİ: O gün sağımı yapılan tüm çiftlik ID'lerini listeliyoruz
-        cursor.execute("SELECT DISTINCT COALESCE(ciftlik_id, 1) FROM sagim_kayitlari WHERE tarih = %s;", (today_date,))
-        ciftlik_idler = [row[0] for row in cursor.fetchall()]
-        if not ciftlik_idler:
-            ciftlik_idler = [1]
+        if ciftlik_id is not None:
+            ciftlik_idler = [ciftlik_id]
+        else:
+            cursor.execute("SELECT DISTINCT COALESCE(ciftlik_id, 1) FROM sagim_kayitlari WHERE tarih = %s;", (today_date,))
+            ciftlik_idler = [row[0] for row in cursor.fetchall()]
+            if not ciftlik_idler:
+                ciftlik_idler = [1]
         
         cursor.execute("SELECT DISTINCT tarih FROM sagim_kayitlari WHERE tarih < %s ORDER BY tarih DESC LIMIT 1;", (today_date,))
         yesterday_date_row = cursor.fetchone()
@@ -331,7 +388,7 @@ def generate_daily_summary():
                 print(f"[{today_date} - Çiftlik #{c_id}] Günlük özet zaten veritabanında mevcut, tekrar kaydedilmedi.")
 
             title = f"🥛 Günlük Çiftlik Özeti (Çiftlik #{c_id})"
-            send_push_notification(title, mesaj, data={"alert_msg": mesaj, "ciftlik_id": c_id})
+            send_push_notification(title, mesaj, data={"alert_msg": mesaj, "ciftlik_id": c_id}, ciftlik_id=c_id)
             ozet_mesajlari.append(mesaj)
             
         return ozet_mesajlari if ozet_mesajlari else None
@@ -351,8 +408,8 @@ def start_scheduler():
         scheduler.add_job(
             func=sagim_verisi_uret_ve_kaydet, 
             trigger='cron', 
-            hour=12, 
-            minute=0, 
+            hour=18, 
+            minute=24, 
             args=['m'], 
             id='simule_sabah', 
             name='Sentetik Veri Üretimi ve Anomali Tespiti (Sabah 11:30)'
@@ -361,8 +418,8 @@ def start_scheduler():
         scheduler.add_job(
             func=sagim_verisi_uret_ve_kaydet, 
             trigger='cron', 
-            hour=19, 
-            minute=0, 
+            hour=18, 
+            minute=25, 
             args=['e'], 
             id='simule_aksam', 
             name='Sentetik Veri Üretimi, Anomali ve Günlük Özet (Akşam 19:00)'

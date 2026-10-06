@@ -36,10 +36,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignSelf: "flex-start",
     marginVertical: 4,
+    flexShrink: 1,
   },
   text: {
     fontSize: 13,
     color: "#555",
     fontStyle: "italic",
+    flexShrink: 1,
   },
 });

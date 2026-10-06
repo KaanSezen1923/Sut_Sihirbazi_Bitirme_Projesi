@@ -5,7 +5,6 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Platform,
-  SafeAreaView,
   StyleSheet,
   Text,
   TextInput,
@@ -15,13 +14,26 @@ import {
   ScrollView,
   StatusBar,
 } from 'react-native';
-import Markdown, { RenderRules } from 'react-native-markdown-display';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Audio } from 'expo-av';
 import { StepIndicator } from '../../components/StepIndicator';
-import Constants from 'expo-constants';
+import { MarkdownView } from '../../components/MarkdownView';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth, API_URL } from '../../context/AuthContext';
+import * as Speech from 'expo-speech';
+import {
+  useAudioRecorder,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  createAudioPlayer,
+  AudioPlayer,
+} from 'expo-audio';
+import {
+  setupNotificationHandler,
+  registerForPushNotificationsAsync,
+  Notifications,
+} from '../../utils/notifications';
 
 interface Message {
   id: string;
@@ -29,11 +41,10 @@ interface Message {
   spokenText?: string;
   sender: 'user' | 'bot';
   timestamp: Date;
-  isStreaming?: boolean; // SSE akışı devam ediyor mu?
-  step?: string;         // Backend'den gelen anlık adım bildirimi
+  isStreaming?: boolean;
+  step?: string;
 }
 
-// ZİL MÖNÜSÜ İÇİN ALARM ARAYÜZÜ
 interface Alarm {
   id: number;
   kupe_no: string;
@@ -44,116 +55,118 @@ interface Alarm {
   mesaj: string;
 }
 
-const getApiUrl = () => {
-  const hostUri = Constants.expoConfig?.hostUri;
-  if (hostUri) {
-    const ip = hostUri.split(':')[0];
-    return `http://${ip}:8000`;
-  }
-  return `http://localhost:8000`;
-};
-
-const API_URL = getApiUrl();
 const SHORTCUTS = [
   { label: 'Merhaba', query: 'Merhaba' },
   { label: '⚠️ Riskliler (Düşüş Olanlar)', query: 'Süt veriminde düşüş yaşayan riskli inekleri listele' },
   { label: '🥛 Bugünkü Toplam Süt', query: 'Bugün sağılan toplam süt miktarı kaç litre?' },
-  { label: "Süt verimi en yüksek inekler", query: 'Süt verimi en yüksek olan 10 ineği getir' },
+  { label: 'Süt verimi en yüksek inekler', query: 'Süt verimi en yüksek olan 10 ineği getir' },
   { label: '📊 Sürü Ortalaması', query: 'Çiftliğin genel sürü süt ortalaması kaç litredir?' },
 ];
 
-const markdownRules: RenderRules = {
-  table: (node, children, parent, styles) => (
-    <ScrollView
-      key={node.key}
-      horizontal={true}
-      showsHorizontalScrollIndicator={false}
-      style={styles.tableScrollView}
-      contentContainerStyle={styles.tableContent}
-    >
-      <View style={styles.tableCard}>
-        {children}
-      </View>
-    </ScrollView>
-  ),
-  tr: (node, children, parent, styles) => (
-    <View key={node.key} style={styles.tr}>
-      {children}
-    </View>
-  ),
-  th: (node, children, parent, styles) => (
-    <View key={node.key} style={styles.th}>
-      <Text style={styles.thText}>{children}</Text>
-    </View>
-  ),
-  td: (node, children, parent, styles) => (
-    <View key={node.key} style={styles.td}>
-      <Text style={styles.tdText}>{children}</Text>
-    </View>
-  ),
-};
-
 export default function Chat() {
   const router = useRouter();
-  const { token } = useAuth();
+  const { token, apiFetch } = useAuth();
   const params = useLocalSearchParams();
   const queryParam = params.query;
 
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
 
-  // AKIŞ VE İŞLEM DURUMLARI
   const [isLoading, setIsLoading] = useState(false);
   const activeEventSourceRef = useRef<EventSource | null>(null);
 
-  // SES DURUMLARI
   const [isRecording, setIsRecording] = useState(false);
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string>('Sorunuz analiz ediliyor...');
 
-  // YENİ: ZİL VE ALARM STATE'LERİ
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const playerRef = useRef<AudioPlayer | null>(null);
+
   const [unreadAlarms, setUnreadAlarms] = useState<Alarm[]>([]);
   const [isBellOpen, setIsBellOpen] = useState(false);
 
-  const soundRef = useRef<Audio.Sound | null>(null);
   const flatListRef = useRef<FlatList>(null);
+
+  // Bildirim işleyicisini güvenli başlat
+  useEffect(() => {
+    setupNotificationHandler();
+  }, []);
+
+  // PUSH BİLDİRİM KURULUMU VE DİNLEYİCİLERİ
+  useEffect(() => {
+    if (token) {
+      registerForPushNotificationsAsync(apiFetch).catch(() => { });
+    }
+
+    let receivedSub: any = null;
+    let responseSub: any = null;
+
+    if (Notifications?.addNotificationReceivedListener) {
+      try {
+        receivedSub = Notifications.addNotificationReceivedListener(() => {
+          fetchUnreadAlarms();
+        });
+      } catch (e) { }
+    }
+
+    if (Notifications?.addNotificationResponseReceivedListener) {
+      try {
+        responseSub = Notifications.addNotificationResponseReceivedListener((response: any) => {
+          const alarmData = response?.notification?.request?.content?.data;
+          if (alarmData && alarmData.kupe_no) {
+            setIsBellOpen(false);
+            router.push({
+              pathname: '/',
+              params: { highlight_cow: String(alarmData.kupe_no), alert_msg: String(alarmData.mesaj || '') },
+            });
+          }
+        });
+      } catch (e) { }
+    }
+
+    return () => {
+      receivedSub?.remove?.();
+      responseSub?.remove?.();
+    };
+  }, [token]);
 
   useEffect(() => {
     if (queryParam && typeof queryParam === 'string') {
       sendMessage(queryParam);
       router.setParams({ query: undefined });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryParam]);
 
   useEffect(() => {
     (async () => {
-      const { status } = await Audio.requestPermissionsAsync();
-      if (status !== 'granted') console.log('Mikrofon izni yok');
+      try {
+        await requestRecordingPermissionsAsync();
+      } catch (e) { }
     })();
     return () => {
-      soundRef.current?.unloadAsync();
+      try {
+        if (playerRef.current) {
+          playerRef.current.pause();
+          playerRef.current.remove();
+          playerRef.current = null;
+        }
+        Speech.stop();
+      } catch (e) { }
       if (activeEventSourceRef.current) {
         activeEventSourceRef.current.close();
       }
     };
   }, []);
 
-  // OKUNMAMIŞ ALARMLARI ÇEK (7/24 Gözcü Bağlantısı)
   const fetchUnreadAlarms = async () => {
     if (!token) return;
     try {
-      const res = await fetch(`${API_URL}/alarms?unread_only=true`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await apiFetch('/alarms?unread_only=true');
       if (res.ok) {
         const data = await res.json();
         if (data.success) setUnreadAlarms(data.alarms || []);
       }
-    } catch {
-      // Alarm çekme hatası
-    }
+    } catch { }
   };
 
   useEffect(() => {
@@ -162,52 +175,84 @@ export default function Chat() {
     return () => clearInterval(interval);
   }, []);
 
-  // ALARMA TIKLANDIĞINDA ÖZETLER KARTINA AKTAR (AHTAPOT SICRAMASI)
   const handleAlarmClick = (alarm: Alarm) => {
     setIsBellOpen(false);
-    // Özetler sekmesine zıpla ve parametre olarak alarm bilgisini ilet
     router.push({
       pathname: '/',
-      params: { highlight_cow: alarm.kupe_no, alert_msg: alarm.mesaj }
+      params: { highlight_cow: alarm.kupe_no, alert_msg: alarm.mesaj },
     });
+  };
+
+  const stopSpeaking = async () => {
+    try {
+      if (playerRef.current) {
+        playerRef.current.pause();
+        playerRef.current.remove();
+        playerRef.current = null;
+      }
+      Speech.stop();
+    } catch (e) { }
+    setSpeakingId(null);
   };
 
   const speakText = async (messageId: string, text: string) => {
     if (!text || !text.trim()) return;
+
     if (speakingId === messageId) {
-      await soundRef.current?.stopAsync();
-      await soundRef.current?.unloadAsync();
-      soundRef.current = null;
-      setSpeakingId(null);
+      await stopSpeaking();
       return;
     }
-    if (soundRef.current) {
-      await soundRef.current.stopAsync();
-      await soundRef.current.unloadAsync();
-      soundRef.current = null;
-    }
+
+    await stopSpeaking();
+
     try {
       setSpeakingId(messageId);
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      try {
+        await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      } catch (e) { }
+
       const ttsUrl = `${API_URL}/tts?text=${encodeURIComponent(text)}`;
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: ttsUrl, headers: { 'Authorization': `Bearer ${token}` } },
-        { shouldPlay: true }
-      );
-      soundRef.current = sound;
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
-          setSpeakingId(null);
-          sound.unloadAsync();
-          soundRef.current = null;
-        }
-      });
+      let startedWithPlayer = false;
+
+      try {
+        const player = createAudioPlayer({
+          uri: ttsUrl,
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        });
+        playerRef.current = player;
+
+        const sub = (player as any).addListener('playbackStatusUpdate', (status: any) => {
+          if (status.didJustFinish || status.error) {
+            sub.remove();
+            setSpeakingId(null);
+            try {
+              player.remove();
+            } catch (e) { }
+            if (playerRef.current === player) {
+              playerRef.current = null;
+            }
+          }
+        });
+
+        player.play();
+        startedWithPlayer = true;
+      } catch (audioErr) {
+        startedWithPlayer = false;
+      }
+
+      if (!startedWithPlayer) {
+        Speech.speak(text, {
+          language: 'tr-TR',
+          onDone: () => setSpeakingId(null),
+          onError: () => setSpeakingId(null),
+          onStopped: () => setSpeakingId(null),
+        });
+      }
     } catch (err) {
       setSpeakingId(null);
     }
   };
 
-  // İŞLEMİ GERİ ALMA / İPTAL ETME (ABORT SSE)
   const handleCancelStreaming = () => {
     if (activeEventSourceRef.current) {
       activeEventSourceRef.current.close();
@@ -215,11 +260,10 @@ export default function Chat() {
     }
     setIsLoading(false);
 
-    // Son eklenen bekleyen/streaming bot mesajını iptal edildi olarak güncelle
     setMessages((prev) =>
       prev.map((msg, index) =>
         index === prev.length - 1 && msg.sender === 'bot' && msg.isStreaming
-          ? { ...msg, text: "⚠️ *İşlem kullanıcı tarafından durduruldu.*", isStreaming: false, step: undefined }
+          ? { ...msg, text: '⚠️ *İşlem kullanıcı tarafından durduruldu.*', isStreaming: false, step: undefined }
           : msg
       )
     );
@@ -239,7 +283,7 @@ export default function Chat() {
     setMessages((prev) => [
       ...prev,
       { id: userMsgId, text: finalQuery, sender: 'user', timestamp: new Date() },
-      { id: botMsgId, text: '', sender: 'bot', timestamp: new Date(), isStreaming: true, step: 'Sorunuz analiz ediliyor...' }
+      { id: botMsgId, text: '', sender: 'bot', timestamp: new Date(), isStreaming: true, step: 'Sorunuz analiz ediliyor...' },
     ]);
 
     if (typeof textOverride !== 'string') setInputText('');
@@ -250,9 +294,9 @@ export default function Chat() {
     try {
       const es = new EventSource(`${API_URL}/query/tool/stream`, {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ question: finalQuery }),
       });
@@ -272,7 +316,7 @@ export default function Chat() {
                     text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`,
                     spokenText: data.answer,
                     isStreaming: false,
-                    step: undefined
+                    step: undefined,
                   }
                   : msg
               )
@@ -284,9 +328,7 @@ export default function Chat() {
             setCurrentStep(data.step);
             setMessages((prev) =>
               prev.map((msg) =>
-                msg.id === botMsgId
-                  ? { ...msg, step: data.step }
-                  : msg
+                msg.id === botMsgId ? { ...msg, step: data.step } : msg
               )
             );
           }
@@ -320,23 +362,39 @@ export default function Chat() {
   const startRecording = async () => {
     try {
       Keyboard.dismiss();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      const { recording: newRecording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      setRecording(newRecording);
+      await stopSpeaking();
+
+      const { granted } = await requestRecordingPermissionsAsync();
+      if (!granted) {
+        console.warn('Mikrofon izni verilmedi.');
+        return;
+      }
+
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
       setIsRecording(true);
-    } catch (err) { }
+    } catch (err) {
+      console.warn('Ses kaydı başlatılamadı:', err);
+      setIsRecording(false);
+    }
   };
 
   const stopRecording = async () => {
-    if (!recording) return;
     try {
       setIsRecording(false);
-      await recording.stopAndUnloadAsync();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
-      const uri = recording.getURI();
-      if (uri) await sendVoiceMessage(uri);
-      setRecording(null);
-    } catch (err) { }
+      await audioRecorder.stop();
+      try {
+        await setAudioModeAsync({ allowsRecording: false });
+      } catch (e) { }
+
+      const uri = audioRecorder.uri;
+      if (uri) {
+        await sendVoiceMessage(uri);
+      }
+    } catch (err) {
+      console.warn('Ses kaydı durdurulamadı:', err);
+    }
   };
 
   const sendVoiceMessage = async (audioUri: string) => {
@@ -344,18 +402,32 @@ export default function Chat() {
     setCurrentStep('Ses dosyası yükleniyor...');
     const startTime = Date.now();
     try {
-      const formData = new FormData();
-      formData.append('audio', { uri: audioUri, type: 'audio/m4a', name: 'recording.m4a' } as any);
-      const transcribeResponse = await fetch(`${API_URL}/transcribe`, { 
-        method: 'POST', 
-        body: formData, 
-        headers: { 
-          'Content-Type': 'multipart/form-data',
-          'Authorization': `Bearer ${token}`
-        } 
-      });
-      const transcribeData = await transcribeResponse.json();
-      const userText = transcribeData.transcription || transcribeData.text;
+      let transcribeData: any = null;
+
+      try {
+        const fileResponse = await fetch(audioUri);
+        const blob = await fileResponse.blob();
+        const formData = new FormData();
+        const file = new File([blob], 'recording.m4a', { type: 'audio/m4a' });
+        formData.append('audio', file);
+
+        const transcribeResponse = await apiFetch('/transcribe', {
+          method: 'POST',
+          body: formData,
+        });
+        transcribeData = await transcribeResponse.json();
+      } catch (blobErr) {
+        const { uploadAsync, FileSystemUploadType } = require('expo-file-system/legacy');
+        const uploadResult = await uploadAsync(`${API_URL}/transcribe`, audioUri, {
+          fieldName: 'audio',
+          httpMethod: 'POST',
+          uploadType: FileSystemUploadType.MULTIPART,
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        transcribeData = JSON.parse(uploadResult.body);
+      }
+
+      const userText = transcribeData?.text || transcribeData?.transcription;
       if (!userText) throw new Error('Ses anlaşılamadı');
 
       const userMsgId = `user-${Date.now()}`;
@@ -364,17 +436,17 @@ export default function Chat() {
       setMessages((prev) => [
         ...prev,
         { id: userMsgId, text: userText, sender: 'user', timestamp: new Date() },
-        { id: botMsgId, text: '', sender: 'bot', timestamp: new Date(), isStreaming: true, step: 'Sorunuz analiz ediliyor...' }
+        { id: botMsgId, text: '', sender: 'bot', timestamp: new Date(), isStreaming: true, step: 'Sorunuz analiz ediliyor...' },
       ]);
 
       setCurrentStep('Sorunuz analiz ediliyor...');
-      const es = new EventSource(`${API_URL}/query/tool/stream`, { 
-        method: 'POST', 
-        headers: { 
+      const es = new EventSource(`${API_URL}/query/tool/stream`, {
+        method: 'POST',
+        headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        }, 
-        body: JSON.stringify({ question: userText }) 
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ question: userText }),
       });
       activeEventSourceRef.current = es;
 
@@ -391,7 +463,7 @@ export default function Chat() {
                     text: `${data.answer}\n\n*⏱️ Yanıt süresi: ${duration} saniye*`,
                     spokenText: data.answer,
                     isStreaming: false,
-                    step: undefined
+                    step: undefined,
                   }
                   : msg
               )
@@ -403,9 +475,7 @@ export default function Chat() {
             setCurrentStep(data.step);
             setMessages((prev) =>
               prev.map((msg) =>
-                msg.id === botMsgId
-                  ? { ...msg, step: data.step }
-                  : msg
+                msg.id === botMsgId ? { ...msg, step: data.step } : msg
               )
             );
           }
@@ -459,10 +529,9 @@ export default function Chat() {
             ) : null}
           </View>
 
-          {/* SSE AKIŞI SIRASINDA CANLI STEP GÖSTERİMİ */}
-          <Markdown style={markdownStyles} rules={markdownRules}>
+          <MarkdownView>
             {item.text}
-          </Markdown>
+          </MarkdownView>
         </View>
       </View>
     );
@@ -472,16 +541,14 @@ export default function Chat() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#fff" />
 
-      {/* YENİ: SOHBET ÜST BARI VE BİLDİRİM ZİLİ */}
       <View style={styles.topBar}>
         <View style={styles.topBarTitleRow}>
-          <MaterialCommunityIcons name="magic-staff" size={22} color="#1B5E20" />
+          <MaterialCommunityIcons name="cow" size={20} color="#388E3C" style={styles.loadingIcon} />
           <Text style={styles.topBarTitle}>Süt Sihirbazı Kaptan Köşkü</Text>
         </View>
 
-        {/* ZİL BUTONU */}
         <TouchableOpacity style={styles.bellButton} onPress={() => setIsBellOpen(!isBellOpen)} activeOpacity={0.8}>
-          <Ionicons name={unreadAlarms.length > 0 ? "notifications" : "notifications-outline"} size={26} color={unreadAlarms.length > 0 ? "#D32F2F" : "#546E7A"} />
+          <Ionicons name={unreadAlarms.length > 0 ? 'notifications' : 'notifications-outline'} size={26} color={unreadAlarms.length > 0 ? '#D32F2F' : '#546E7A'} />
           {unreadAlarms.length > 0 && (
             <View style={styles.bellBadge}>
               <Text style={styles.bellBadgeText}>{unreadAlarms.length}</Text>
@@ -490,7 +557,6 @@ export default function Chat() {
         </TouchableOpacity>
       </View>
 
-      {/* YENİ: AÇILIR ZİL MENÜSÜ (DROPDOWN) */}
       {isBellOpen && (
         <View style={styles.dropdownContainer}>
           <View style={styles.dropdownHeader}>
@@ -520,7 +586,6 @@ export default function Chat() {
         </View>
       )}
 
-      {/* CHAT ALANI */}
       <FlatList
         ref={flatListRef}
         data={messages}
@@ -565,7 +630,7 @@ export default function Chat() {
               style={styles.input}
               value={inputText}
               onChangeText={setInputText}
-              placeholder={isLoading ? "Sihirbazın yanıt vermesi bekleniyor..." : "Sihirbaza sorun..."}
+              placeholder={isLoading ? 'Sihirbazın yanıt vermesi bekleniyor...' : 'Sihirbaza sorun...'}
               placeholderTextColor="#7cb342"
               multiline
               maxLength={1000}
@@ -575,7 +640,6 @@ export default function Chat() {
             />
 
             {isLoading ? (
-              /* İŞLEMİ GERİ ALMA / DURDURMA BUTONU */
               <TouchableOpacity style={styles.cancelButton} onPress={handleCancelStreaming}>
                 <Ionicons name="stop" size={20} color="#fff" />
               </TouchableOpacity>
@@ -585,7 +649,7 @@ export default function Chat() {
               </TouchableOpacity>
             ) : (
               <TouchableOpacity style={[styles.micButton, isRecording && styles.recordingActive]} onPress={isRecording ? stopRecording : startRecording}>
-                <Ionicons name={isRecording ? "stop" : "mic"} size={24} color={isRecording ? "#fff" : "#2E7D32"} />
+                <Ionicons name={isRecording ? 'stop' : 'mic'} size={24} color={isRecording ? '#fff' : '#2E7D32'} />
               </TouchableOpacity>
             )}
           </View>
@@ -616,20 +680,6 @@ const COLORS = {
   border: '#E0E0E0',
 };
 
-const markdownStyles = StyleSheet.create({
-  body: { color: COLORS.textBody, fontSize: 16, lineHeight: 24 },
-  strong: { fontWeight: '700', color: COLORS.textDark },
-  paragraph: { marginTop: 0, marginBottom: 12, flexWrap: 'wrap' },
-  tableScrollView: { marginVertical: 12 },
-  tableContent: { paddingRight: 10 },
-  tableCard: { borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, backgroundColor: '#fff', overflow: 'hidden', minWidth: 500 },
-  tr: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#F1F8E9' },
-  th: { padding: 12, backgroundColor: COLORS.secondary, borderRightWidth: 1, borderColor: '#C5E1A5', width: 120, justifyContent: 'center' },
-  td: { padding: 12, borderRightWidth: 1, borderColor: '#F1F8E9', width: 120, justifyContent: 'center' },
-  thText: { fontWeight: '700', fontSize: 14, color: COLORS.textDark },
-  tdText: { fontSize: 14, color: '#333' }
-});
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
   listContent: { paddingHorizontal: 16, paddingBottom: 20, flexGrow: 1 },
@@ -643,26 +693,7 @@ const styles = StyleSheet.create({
   botHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   speakerButton: { padding: 4, marginBottom: 4 },
 
-  // STREAMING ADIM BALONCUĞU STİLLERİ
-  streamingContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.secondary,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 12,
-    marginTop: 4,
-    borderLeftWidth: 3,
-    borderLeftColor: COLORS.primarySoft
-  },
-  streamingStepText: {
-    color: COLORS.primarySoft,
-    fontSize: 14,
-    fontStyle: 'italic',
-    fontWeight: '500'
-  },
-
-  loadingContainer: { flexDirection: 'row', alignItems: 'center', marginLeft: 42, marginTop: 5, marginBottom: 20 },
+  loadingContainer: { flexDirection: 'row', alignItems: 'center', marginLeft: 42, marginRight: 16, marginTop: 5, marginBottom: 20, flexShrink: 1 },
   loadingIcon: { marginRight: 8, opacity: 0.8 },
   inputWrapper: { backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#F1F8E9', paddingHorizontal: 16, paddingVertical: 12, paddingBottom: Platform.OS === 'ios' ? 8 : 12 },
   inputContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.inputBg, borderRadius: 28, paddingHorizontal: 8, paddingVertical: 6, minHeight: 52 },
@@ -670,8 +701,6 @@ const styles = StyleSheet.create({
   micButton: { width: 42, height: 42, justifyContent: 'center', alignItems: 'center', borderRadius: 21, backgroundColor: COLORS.secondary },
   recordingActive: { backgroundColor: COLORS.danger, elevation: 4 },
   sendButton: { width: 42, height: 42, backgroundColor: COLORS.primary, borderRadius: 21, justifyContent: 'center', alignItems: 'center' },
-
-  // İPTAL ET / DURDUR BUTONU
   cancelButton: { width: 42, height: 42, backgroundColor: COLORS.danger, borderRadius: 21, justifyContent: 'center', alignItems: 'center' },
 
   emptyChatContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 60 },
@@ -690,7 +719,6 @@ const styles = StyleSheet.create({
   bellBadge: { position: 'absolute', top: 2, right: 2, backgroundColor: '#D32F2F', borderRadius: 10, minWidth: 18, height: 18, justifyContent: 'center', alignItems: 'center', borderWidth: 1.5, borderColor: '#fff' },
   bellBadgeText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
 
-  // AÇILIR ZİL MENÜSÜ STİLLERİ
   dropdownContainer: { position: 'absolute', top: 56, right: 16, left: 16, backgroundColor: '#ffffff', borderRadius: 16, borderWidth: 1, borderColor: '#E0E8E0', padding: 12, zIndex: 100, elevation: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 10 },
   dropdownHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#F1F8E9', marginBottom: 8 },
   dropdownTitle: { fontSize: 14, fontWeight: 'bold', color: '#D32F2F' },

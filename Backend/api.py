@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, BackgroundTasks,Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, BackgroundTasks, Depends, Query
 from contextlib import asynccontextmanager
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
@@ -23,9 +23,16 @@ import jwt
 from fastapi.security import OAuth2PasswordBearer
 
 
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "super-gizli-sut-sihirbazi-anahtari-12345")
+# Varsayılan/sabit bir anahtar YOK: tanımlı değilse uygulama hiç açılmaz.
+# Üretmek için:  python -c "import secrets; print(secrets.token_urlsafe(48))"
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY")
+if not SECRET_KEY or len(SECRET_KEY) < 32:
+    raise RuntimeError("JWT_SECRET_KEY ortam değişkeni tanımlı olmalı ve en az 32 karakter olmalı.")
+
+# Geliştirme/test uçları (veri simülasyonu, tool testi) varsayılan olarak KAPALI.
+ENABLE_DEV_ENDPOINTS = os.environ.get("ENABLE_DEV_ENDPOINTS", "").lower() in ("1", "true", "yes")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 1 Günlük token süresi
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -53,7 +60,17 @@ async def lifespan(app: FastAPI):
         scheduler.shutdown()
         print("Zamanlanmış görev motoru durduruldu.")
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class SignupRequest(BaseModel):
     ciftlik_adi: str
@@ -71,6 +88,14 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     ciftlik_id: int
     ad_soyad: str
+
+class ProfileResponse(BaseModel):
+    ad_soyad: str
+    eposta: str
+    telefon: Optional[str] = None
+    ciftlik_id: int
+    ciftlik_adi: str
+    inek_sayisi: int
 
 class QueryRequest(BaseModel):
     question: str
@@ -149,6 +174,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     except jwt.PyJWTError:
         raise credentials_exception
 
+async def require_dev_endpoints(current_user: dict = Depends(get_current_user)):
+    """Geliştirme uçları: oturum açmış kullanıcı + ENABLE_DEV_ENDPOINTS=true gerekir; aksi halde 404."""
+    if not ENABLE_DEV_ENDPOINTS:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return current_user
+
 def sse_event(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -162,8 +193,6 @@ def read_root():
 
 @app.post("/auth/signup", response_model=TokenResponse)
 def signup(request: SignupRequest):
-    print(f"---> GELEN ŞİFRE: '{request.sifre}'")
-    print(f"---> ŞİFRE UZUNLUĞU: {len(request.sifre)} karakter")
     from alarms import get_db_connection
     conn = None
     try:
@@ -264,47 +293,99 @@ def login(request: LoginRequest):
         if conn:
             conn.close()
 
-async def tool_query_stream(question: str) -> AsyncGenerator[str, None]:
+@app.get("/auth/profile", response_model=ProfileResponse)
+def get_user_profile(current_user: dict = Depends(get_current_user)):
+    from alarms import get_db_connection
+    from psycopg2.extras import RealDictCursor
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute(
+            """
+            SELECT k.ad_soyad, k.eposta, k.telefon, c.ciftlik_adi,
+                   (SELECT COUNT(*) FROM inekler WHERE ciftlik_id = c.id) as inek_sayisi
+            FROM kullanicilar k
+            JOIN ciftlikler c ON k.ciftlik_id = c.id
+            WHERE k.id = %s;
+            """,
+            (current_user["user_id"],)
+        )
+        profile = cursor.fetchone()
+        cursor.close()
+        
+        if not profile:
+            raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+            
+        return ProfileResponse(
+            ad_soyad=profile["ad_soyad"],
+            eposta=profile["eposta"],
+            telefon=profile["telefon"],
+            ciftlik_id=current_user["ciftlik_id"],
+            ciftlik_adi=profile["ciftlik_adi"],
+            inek_sayisi=profile["inek_sayisi"]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Profil bilgileri alınırken hata oluştu: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+def _tool_config(ciftlik_id: int) -> dict:
+    """
+    Çiftlik kimliği, LLM'e/prompt'a konmaz; araçlara RunnableConfig üzerinden SUNUCU tarafında verilir.
+    Kullanıcı mesajına ne yazarsa yazsın araçlar yalnızca JWT'deki çiftlikte çalışır.
+    """
+    return {"configurable": {"ciftlik_id": ciftlik_id}}
+
+async def tool_query_stream(question: str, ciftlik_id: int) -> AsyncGenerator[str, None]:
     yield sse_event({"step": "☁️ Süt Sihirbazı sorunuzu analiz ediyor...", "done": False})
-    
+
     final_answer = ""
     tools_used = []
     tool_outputs = []
-    
+
     try:
-        # DÜZELTME 1: rag_app yerine toolrag_app kullanıldı!
-        async for output in toolrag_app.astream({"messages": [HumanMessage(content=question)]}, stream_mode="updates"):
+        async for output in toolrag_app.astream(
+            {"messages": [HumanMessage(content=question)]},
+            config=_tool_config(ciftlik_id),
+            stream_mode="updates",
+        ):
             for node_name, state_update in output.items():
                 messages = state_update.get("messages", [])
                 if not messages:
                     continue
                 last_msg = messages[-1]
-                
+
                 if node_name == "router":
                     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
                         tool_names = [tc["name"] for tc in last_msg.tool_calls]
                         yield sse_event({"step": f"🛠️ Gerekli araçlar tetikleniyor: {', '.join(tool_names)}", "done": False})
                     else:
+                        yield sse_event({"step": "⏳ Yanıt hazırlanıyor...", "done": False})
                         final_answer = last_msg.content
-                        
+
                 elif node_name == "tools":
                     for tool_msg in messages:
                         if isinstance(tool_msg, ToolMessage):
                             tools_used.append(tool_msg.name)
                             tool_outputs.append({"tool": tool_msg.name, "output": tool_msg.content})
                             yield sse_event({"step": f"✅ Veri çekildi: {tool_msg.name}", "done": False})
-                            
+
                 elif node_name == "summarizer":
-                    yield sse_event({"step": "🔒 Gizlilik Kalkanı (Yerel Model) verileri yorumluyor...", "done": False})
+                    yield sse_event({"step": "⏳ Yanıt hazırlanıyor...", "done": False})
                     final_answer = last_msg.content
-                    
+
                 elif node_name == "generate_general_answer":
-                    yield sse_event({"step": "☁️ Genel sohbet yanıtı hazırlanıyor...", "done": False})
+                    yield sse_event({"step": "⏳ Yanıt hazırlanıyor...", "done": False})
                     final_answer = last_msg.content
-                    
+
     except Exception as e:
-        print(f"Graph çalışma hatası: {e}")
-        yield sse_event({"step": "Bir hata oluştu...", "done": True, "answer": f"Üzgünüm, bir hata oluştu: {str(e)}"})
+        print(f"Graph çalışma hatası: {e}")  # ayrıntı yalnızca sunucu log'unda
+        yield sse_event({"step": "Bir hata oluştu...", "done": True, "answer": "Üzgünüm, işleminizi gerçekleştirirken bir hata oluştu."})
         return
 
     yield sse_event({
@@ -314,43 +395,47 @@ async def tool_query_stream(question: str) -> AsyncGenerator[str, None]:
         "tool_outputs": tool_outputs
     })
 
-# DÜZELTME 2: EKSİK OLAN STREAMING ENDPOINT ROTA TANIMI EKLENDİ!
 @app.post("/query/tool/stream")
 async def process_tool_query_stream(request: QueryRequest, current_user: dict = Depends(get_current_user)):
-    """Yeni LangGraph araç ajanını (Tool RAG) streaming olarak çalıştırır."""
+    """LangGraph araç ajanını (Tool RAG) streaming olarak çalıştırır."""
     return StreamingResponse(
-        tool_query_stream(request.question),
+        tool_query_stream(request.question, current_user["ciftlik_id"]),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no", 
+            "X-Accel-Buffering": "no",
         }
+    )
+
+def _run_tool_agent(question: str, ciftlik_id: int) -> ToolQueryResponse:
+    final_state = toolrag_app.invoke(
+        {"messages": [HumanMessage(content=question)]},
+        config=_tool_config(ciftlik_id),
+    )
+    messages = final_state["messages"]
+
+    tools_used = []
+    tool_outputs = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            tools_used.append(msg.name)
+            tool_outputs.append({"tool": msg.name, "output": msg.content})
+
+    return ToolQueryResponse(
+        answer=messages[-1].content,
+        tools_used=tools_used,
+        tool_outputs=tool_outputs
     )
 
 @app.post("/query/tool/", response_model=ToolQueryResponse)
 def process_tool_query(request: QueryRequest, current_user: dict = Depends(get_current_user)):
     """Streaming olmayan standart istekler için Tool RAG endpointi."""
-    state = {"messages": [HumanMessage(content=request.question)]}
-    
-    # DÜZELTME 3: Burada da rag_app yerine toolrag_app kullanıldı!
-    final_state = toolrag_app.invoke(state)
-    
-    messages = final_state["messages"]
-    last_message = messages[-1].content
-    
-    tools_used = []
-    tool_outputs = []
-    
-    for msg in messages:
-        if isinstance(msg, ToolMessage):
-            tools_used.append(msg.name)
-            tool_outputs.append({"tool": msg.name, "output": msg.content})
-            
-    return ToolQueryResponse(
-        answer=last_message,
-        tools_used=tools_used,
-        tool_outputs=tool_outputs
-    )
+    return _run_tool_agent(request.question, current_user["ciftlik_id"])
+
+@app.post("/query/tool_test/", response_model=ToolQueryResponse)
+def process_tool_query_test(request: QueryRequest, current_user: dict = Depends(require_dev_endpoints)):
+    """[DEV] Tool RAG testi. Yalnızca ENABLE_DEV_ENDPOINTS=true ve oturumla; kendi çiftliğinizde çalışır."""
+    return _run_tool_agent(request.question, current_user["ciftlik_id"])
 
 # === SQL RAG ENDPOINTLERİ ===
 async def sql_query_stream(question: str) -> AsyncGenerator[str, None]:
@@ -529,9 +614,13 @@ def register_push_token(request: PushTokenRequest, current_user: dict = Depends(
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Token çiftliğe bağlanır; aynı cihaz başka bir hesapla girerse yeni çiftliğe taşınır.
         cursor.execute(
-            "INSERT INTO cihaz_tokenlari (token) VALUES (%s) ON CONFLICT (token) DO NOTHING;",
-            (token,)
+            """
+            INSERT INTO cihaz_tokenlari (token, ciftlik_id) VALUES (%s, %s)
+            ON CONFLICT (token) DO UPDATE SET ciftlik_id = EXCLUDED.ciftlik_id;
+            """,
+            (token, current_user["ciftlik_id"])
         )
         conn.commit()
         cursor.close()
@@ -542,11 +631,33 @@ def register_push_token(request: PushTokenRequest, current_user: dict = Depends(
         if conn:
             conn.close()
 
+@app.post("/unregister-token")
+def unregister_push_token(request: PushTokenRequest, current_user: dict = Depends(get_current_user)):
+    """Çıkış yapıldığında çağrılmalı: cihaz artık bu çiftliğin bildirimlerini almaz."""
+    from alarms import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM cihaz_tokenlari WHERE token = %s AND ciftlik_id = %s;",
+            (request.token.strip(), current_user["ciftlik_id"])
+        )
+        conn.commit()
+        cursor.close()
+        return {"success": True}
+    except Exception as e:
+        print(f"Token silme hatası: {e}")
+        raise HTTPException(status_code=500, detail="Token silinirken bir hata oluştu.")
+    finally:
+        if conn:
+            conn.close()
+
 @app.post("/alarms/check")
 def trigger_alarm_check(current_user: dict = Depends(get_current_user)):
     from alarms import check_for_milk_drops
     try:
-        new_alarms = check_for_milk_drops()
+        new_alarms = check_for_milk_drops(ciftlik_id=current_user["ciftlik_id"])
         return {
             "success": True, 
             "message": f"Süt düşüş analizi tamamlandı. {new_alarms} yeni alarm tespit edildi."
@@ -558,7 +669,7 @@ def trigger_alarm_check(current_user: dict = Depends(get_current_user)):
 def trigger_daily_summary(current_user: dict = Depends(get_current_user)):
     from alarms import generate_daily_summary
     try:
-        summary_msg = generate_daily_summary()
+        summary_msg = generate_daily_summary(ciftlik_id=current_user["ciftlik_id"])
         if summary_msg:
             return {
                 "success": True,
@@ -582,26 +693,18 @@ def get_alarms(unread_only: bool = False, current_user: dict = Depends(get_curre
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        if unread_only:
-            cursor.execute(
-                """
-                SELECT a.id, a.kupe_no, i.isim, a.tarih, a.sagim_zamani, a.eski_ortalama, a.son_verim, a.dusus_yuzdesi, a.mesaj, a.okundu, a.olusturulma_tarihi
-                FROM alarmlar a
-                LEFT JOIN inekler i ON a.kupe_no = i.kupe_no
-                WHERE a.okundu = FALSE
-                ORDER BY a.tarih DESC, a.id DESC;
-                """
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT a.id, a.kupe_no, i.isim, a.tarih, a.sagim_zamani, a.eski_ortalama, a.son_verim, a.dusus_yuzdesi, a.mesaj, a.okundu, a.olusturulma_tarihi
-                FROM alarmlar a
-                LEFT JOIN inekler i ON a.kupe_no = i.kupe_no
-                ORDER BY a.tarih DESC, a.id DESC;
-                """
-            )
-            
+        okundu_filtresi = "AND a.okundu = FALSE" if unread_only else ""  # sabit ifade, kullanıcı girdisi değil
+        cursor.execute(
+            f"""
+            SELECT a.id, a.kupe_no, i.isim, a.tarih, a.sagim_zamani, a.eski_ortalama, a.son_verim, a.dusus_yuzdesi, a.mesaj, a.okundu, a.olusturulma_tarihi
+            FROM alarmlar a
+            LEFT JOIN inekler i ON a.kupe_no = i.kupe_no AND i.ciftlik_id = a.ciftlik_id
+            WHERE a.ciftlik_id = %s {okundu_filtresi}
+            ORDER BY a.tarih DESC, a.id DESC;
+            """,
+            (current_user["ciftlik_id"],)
+        )
+
         alarms = cursor.fetchall()
         cursor.close()
         
@@ -635,11 +738,13 @@ def get_summaries(current_user: dict = Depends(get_current_user)):
                    s.en_verimli_inek_kupe_no, i.isim as en_verimli_inek_isim, 
                    s.mesaj, s.olusturulma_tarihi
             FROM gunluk_ozetler s
-            LEFT JOIN inekler i ON s.en_verimli_inek_kupe_no = i.kupe_no
+            LEFT JOIN inekler i ON s.en_verimli_inek_kupe_no = i.kupe_no AND i.ciftlik_id = s.ciftlik_id
+            WHERE s.ciftlik_id = %s
             ORDER BY s.tarih DESC;
-            """
+            """,
+            (current_user["ciftlik_id"],)
         )
-        
+
         summaries = cursor.fetchall()
         cursor.close()
         
@@ -663,7 +768,10 @@ def mark_alarm_as_read(alarm_id: int, current_user: dict = Depends(get_current_u
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("UPDATE alarmlar SET okundu = TRUE WHERE id = %s;", (alarm_id,))
+        cursor.execute(
+            "UPDATE alarmlar SET okundu = TRUE WHERE id = %s AND ciftlik_id = %s;",
+            (alarm_id, current_user["ciftlik_id"])
+        )
         rows_affected = cursor.rowcount
         conn.commit()
         cursor.close()
@@ -681,7 +789,7 @@ def mark_alarm_as_read(alarm_id: int, current_user: dict = Depends(get_current_u
             conn.close()
 
 @app.post("/simule-data/sabah")
-def simule_data_sabah(current_user: dict = Depends(get_current_user)):
+def simule_data_sabah(current_user: dict = Depends(require_dev_endpoints)):
     try:
         sagim_verisi_uret_ve_kaydet("m")
         return {"success": True, "message": "Sabah verileri başarıyla üretildi."}
@@ -689,7 +797,7 @@ def simule_data_sabah(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
 
 @app.post("/simule-data/aksam")
-def simule_data_aksam(current_user: dict = Depends(get_current_user)):
+def simule_data_aksam(current_user: dict = Depends(require_dev_endpoints)):
     try:
         sagim_verisi_uret_ve_kaydet("e")
         return {"success": True, "message": "Akşam verileri başarıyla üretildi."}
@@ -708,25 +816,25 @@ def get_cows_daily_change(current_user: dict = Depends(get_current_user)):
         # En son tarih (bugün) ve bir önceki tarih (dün) bulunarak inek bazlı verimler kıyaslanır
         query = """
         WITH son_tarih AS (
-            SELECT MAX(tarih) as bugun FROM sagim_kayitlari
+            SELECT MAX(tarih) as bugun FROM sagim_kayitlari WHERE ciftlik_id = %(cid)s
         ),
         onceki_tarih AS (
             SELECT DISTINCT tarih as dun 
             FROM sagim_kayitlari, son_tarih 
-            WHERE tarih < son_tarih.bugun 
+            WHERE ciftlik_id = %(cid)s AND tarih < son_tarih.bugun 
             ORDER BY tarih DESC 
             LIMIT 1
         ),
         bugun_sut AS (
             SELECT kupe_no, SUM(sut_miktari) as bugun_toplam
             FROM sagim_kayitlari, son_tarih
-            WHERE tarih = son_tarih.bugun
+            WHERE ciftlik_id = %(cid)s AND tarih = son_tarih.bugun
             GROUP BY kupe_no
         ),
         dun_sut AS (
             SELECT kupe_no, SUM(sut_miktari) as dun_toplam
             FROM sagim_kayitlari, onceki_tarih
-            WHERE tarih = onceki_tarih.dun
+            WHERE ciftlik_id = %(cid)s AND tarih = onceki_tarih.dun
             GROUP BY kupe_no
         )
         SELECT 
@@ -742,9 +850,10 @@ def get_cows_daily_change(current_user: dict = Depends(get_current_user)):
         FROM inekler i
         LEFT JOIN dun_sut d ON i.kupe_no = d.kupe_no
         LEFT JOIN bugun_sut b ON i.kupe_no = b.kupe_no
-        ORDER BY degisim_orani DESC, i.isim ASC;;
+        WHERE i.ciftlik_id = %(cid)s
+        ORDER BY degisim_orani DESC, i.isim ASC;
         """
-        cursor.execute(query)
+        cursor.execute(query, {"cid": current_user["ciftlik_id"]})
         rows = cursor.fetchall()
         cursor.close()
         
@@ -779,22 +888,25 @@ def get_cows(current_user: dict = Depends(get_current_user)):
         LEFT JOIN (
             SELECT kupe_no, ROUND(AVG(sut_miktari)::numeric, 1) as avg_sut
             FROM sagim_kayitlari
+            WHERE ciftlik_id = %(cid)s
             GROUP BY kupe_no
         ) avg_tbl ON i.kupe_no = avg_tbl.kupe_no
         LEFT JOIN (
             SELECT DISTINCT ON (kupe_no) kupe_no, sut_miktari
             FROM sagim_kayitlari
+            WHERE ciftlik_id = %(cid)s
             ORDER BY kupe_no, tarih DESC, id DESC
         ) last_tbl ON i.kupe_no = last_tbl.kupe_no
         LEFT JOIN (
             SELECT kupe_no, COUNT(*) as unread_count
             FROM alarmlar
-            WHERE okundu = FALSE
+            WHERE okundu = FALSE AND ciftlik_id = %(cid)s
             GROUP BY kupe_no
         ) alarm_tbl ON i.kupe_no = alarm_tbl.kupe_no
+        WHERE i.ciftlik_id = %(cid)s
         ORDER BY i.isim;
         """
-        cursor.execute(query)
+        cursor.execute(query, {"cid": current_user["ciftlik_id"]})
         cows = cursor.fetchall()
         cursor.close()
         
@@ -811,7 +923,7 @@ def get_cows(current_user: dict = Depends(get_current_user)):
             conn.close()
 
 @app.get("/stats/farm")
-def get_farm_stats(days: int = 10, current_user: dict = Depends(get_current_user)):
+def get_farm_stats(days: int = Query(10, ge=1, le=365), current_user: dict = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -819,15 +931,15 @@ def get_farm_stats(days: int = 10, current_user: dict = Depends(get_current_user
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # LIMIT kısmını dinamik hale getirdik
         query = """
         SELECT tarih, ROUND(SUM(sut_miktari)::numeric, 1) as toplam_sut
         FROM sagim_kayitlari
+        WHERE ciftlik_id = %s
         GROUP BY tarih
         ORDER BY tarih DESC
         LIMIT %s;
         """
-        cursor.execute(query, (days,))
+        cursor.execute(query, (current_user["ciftlik_id"], days))
         rows = cursor.fetchall()
         cursor.close()
         
@@ -856,12 +968,12 @@ def get_cow_stats(kupe_no: str, current_user: dict = Depends(get_current_user)):
         query = """
         SELECT tarih, ROUND(SUM(sut_miktari)::numeric, 1) as toplam_sut
         FROM sagim_kayitlari
-        WHERE kupe_no = %s
+        WHERE kupe_no = %s AND ciftlik_id = %s
         GROUP BY tarih
         ORDER BY tarih DESC
         LIMIT 10;
         """
-        cursor.execute(query, (kupe_no,))
+        cursor.execute(query, (kupe_no, current_user["ciftlik_id"]))
         rows = cursor.fetchall()
         cursor.close()
         

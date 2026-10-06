@@ -5,7 +5,6 @@ import {
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import Constants from 'expo-constants';
 import { useAuth } from '../../context/AuthContext';
 
 
@@ -37,18 +36,11 @@ interface RiskyCow extends Cow {
   riskMessage: string;
 }
 
-const getApiUrl = () => {
-  const hostUri = Constants.expoConfig?.hostUri;
-  if (hostUri) return `http://${hostUri.split(':')[0]}:8000`;
-  return `http://localhost:8000`;
-};
-
-const API_URL = getApiUrl();
 const screenWidth = Dimensions.get('window').width - 32;
 
 export default function Statistics() {
   const router = useRouter();
-  const { token } = useAuth();
+  const { token, apiFetch } = useAuth();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [chartLoading, setChartLoading] = useState(false);
@@ -63,9 +55,7 @@ export default function Statistics() {
     if (!token) return;
     setChartLoading(true);
     try {
-      const res = await fetch(`${API_URL}/stats/farm`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await apiFetch('/stats/farm');
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.yields && data.yields.length >= 2) {
@@ -98,12 +88,8 @@ export default function Statistics() {
     if (!token) return;
     try {
       const [cowsRes, alarmsRes] = await Promise.all([
-        fetch(`${API_URL}/cows`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }),
-        fetch(`${API_URL}/alarms`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }),
+        apiFetch('/cows'),
+        apiFetch('/alarms'),
       ]);
 
       let allCows: Cow[] = [];

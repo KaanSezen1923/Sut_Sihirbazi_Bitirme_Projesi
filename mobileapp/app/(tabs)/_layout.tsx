@@ -1,9 +1,8 @@
 import React from 'react';
 import { Tabs } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { StyleSheet, Platform, TouchableOpacity } from 'react-native';
+import { StyleSheet, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useAuth } from '../../context/AuthContext';
 
 const COLORS = {
   primary: '#1B5E20',
@@ -14,7 +13,6 @@ const COLORS = {
 
 export default function TabsLayout() {
   const insets = useSafeAreaInsets();
-  const { signOut } = useAuth();
 
   const tabHeight = Platform.OS === 'ios' 
     ? (65 + insets.bottom) 
@@ -42,15 +40,6 @@ export default function TabsLayout() {
         headerTitleStyle: styles.headerTitle,
         headerTintColor: COLORS.primary,
         headerTitleAlign: 'left',
-        headerRight: () => (
-          <TouchableOpacity
-            onPress={signOut}
-            style={{ marginRight: 16, padding: 8 }}
-            activeOpacity={0.7}
-          >
-            <Ionicons name="log-out-outline" size={24} color={COLORS.primary} />
-          </TouchableOpacity>
-        ),
       }}
     >
       {/* VİZYON GÜNCELLESİ: 1. SEKME ARTIK SÜT SİHİRBAZI */}
@@ -102,6 +91,19 @@ export default function TabsLayout() {
             <Ionicons name={focused ? "bar-chart" : "bar-chart-outline"} size={22} color={color} />
           ),
           headerTitle: '📈 Detaylı Verim Analizleri',
+        }}
+      />
+
+      {/* 5. SEKME: PROFİL */}
+      <Tabs.Screen
+        name="profile"
+        options={{
+          title: 'Profil',
+          tabBarLabel: 'Profil',
+          tabBarIcon: ({ color, focused }) => (
+            <Ionicons name={focused ? "person" : "person-outline"} size={22} color={color} />
+          ),
+          headerTitle: '👤 Profil Bilgileri',
         }}
       />
     </Tabs>

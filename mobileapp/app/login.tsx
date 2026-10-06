@@ -9,21 +9,12 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
-  SafeAreaView,
   ScrollView,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import Constants from 'expo-constants';
-import { useAuth } from '../context/AuthContext';
-
-const getApiUrl = () => {
-  const hostUri = Constants.expoConfig?.hostUri;
-  if (hostUri) return `http://${hostUri.split(':')[0]}:8000`;
-  return `http://localhost:8000`;
-};
-
-const API_URL = getApiUrl();
+import { useAuth, API_URL } from '../context/AuthContext';
 
 export default function Login() {
   const router = useRouter();
@@ -87,7 +78,7 @@ export default function Login() {
         <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
           <View style={styles.headerContainer}>
             <View style={styles.logoCircle}>
-              <MaterialCommunityIcons name="magic-staff" size={48} color="#fff" />
+              <MaterialCommunityIcons name="barn" size={56} color="#388E3C" />
             </View>
             <Text style={styles.appTitle}>Süt Sihirbazı</Text>
             <Text style={styles.appSubtitle}>Yapay Zeka Destekli Çiftlik Yönetimi</Text>

@@ -5,7 +5,6 @@ import {
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import Constants from 'expo-constants';
 import { useAuth } from '../../context/AuthContext';
 
 interface Alarm {
@@ -23,17 +22,9 @@ interface CowDailyChange {
   kupe_no: string; isim: string; dunku_sut: number; bugunku_sut: number; degisim_orani: number;
 }
 
-const getApiUrl = () => {
-  const hostUri = Constants.expoConfig?.hostUri;
-  if (hostUri) return `http://${hostUri.split(':')[0]}:8000`;
-  return `http://localhost:8000`;
-};
-
-const API_URL = getApiUrl();
-
 export default function Dashboard() {
   const router = useRouter();
-  const { token } = useAuth();
+  const { token, apiFetch } = useAuth();
   const params = useLocalSearchParams();
   const highlightCow = params.highlight_cow;
   const alertMsg = params.alert_msg;
@@ -51,12 +42,8 @@ export default function Dashboard() {
     if (!token) return;
     try {
       const [alarmsRes, summariesRes] = await Promise.all([
-        fetch(`${API_URL}/alarms?unread_only=true`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }),
-        fetch(`${API_URL}/summaries`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }),
+        apiFetch('/alarms?unread_only=true'),
+        apiFetch('/summaries'),
       ]);
       if (alarmsRes.ok) setAlarms((await alarmsRes.json()).alarms || []);
       if (summariesRes.ok) setSummaries((await summariesRes.json()).summaries || []);
@@ -94,9 +81,7 @@ export default function Dashboard() {
     setModalVisible(true);
     setTableLoading(true);
     try {
-      const res = await fetch(`${API_URL}/cows/daily-change`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await apiFetch('/cows/daily-change');
       const data = await res.json();
       if (res.ok && data.success) setCowsDailyData(data.data || []);
     } catch (e) { Alert.alert('Hata', 'Tablo verileri alınamadı.'); }
@@ -106,9 +91,8 @@ export default function Dashboard() {
   const markAlarmAsRead = async (alarmId: number) => {
     try {
       setAlarms((prev) => prev.filter((a) => a.id !== alarmId));
-      await fetch(`${API_URL}/alarms/${alarmId}/read`, { 
+      await apiFetch(`/alarms/${alarmId}/read`, { 
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
       });
     } catch (error) { fetchData(); }
   };
@@ -119,9 +103,8 @@ export default function Dashboard() {
       type === 'aksam' ? '/simule-data/aksam' :
         type === 'check' ? '/alarms/check' : '/alarms/daily-summary';
     try {
-      const res = await fetch(`${API_URL}${endpoint}`, { 
+      const res = await apiFetch(endpoint, { 
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
       if (res.ok && data.success) {
