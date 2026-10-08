@@ -1,3 +1,7 @@
+İşte projenizde yaptığınız kapsamlı geliştirmeler (Dashboard, Sürü Yönetimi, İstatistikler, Profil, Bildirimler ve Gelişmiş Chat özellikleri) dikkate alınarak güncellenmiş ve zenginleştirilmiş **README.md** dosyası:
+
+---
+
 # 🐄 Süt Sihirbazı - Kullanım Kılavuzu
 
 > **Süt Sihirbazı**, süt çiftçiliğiyle uğraşan çiftçiler için geliştirilmiş yapay zekâ destekli, kapsamlı bir mobil asistan uygulamasıdır. İnek sağlığı, çiftlik verimi, yemleme, süt üretimi ve sürü analizi gibi konularda doğal dilde sorular sorarak anında, veriye dayalı yanıtlar alabilirsiniz.
@@ -123,41 +127,31 @@ Açılan QR kodu **Expo Go** uygulamasıyla tarayarak cihazınızda test edebili
 
 ## 🏗️ Proje Yapısı
 
+```text
 Sut_Sihirbazi_Bitirme_Projesi/
 ├── Backend/
-│   ├── alarms.py               # Alarm ve bildirim yönetimi
-│   ├── api.py                  # FastAPI ana uygulama ve endpoint'ler
-│   ├── auth.py                 # Kimlik doğrulama ve yetkilendirme işlemleri
-│   ├── csv_rag.py              # CSV RAG analiz motoru
-│   ├── data.py                 # Veri işleme ve yönetim modülü
-│   ├── sql_rag.py              # SQL RAG sorgu motoru
-│   ├── tool_rag.py             # Özel araç (Tool) RAG motoru
-│   ├── tr_TR-dfki-medium.onnx  # Türkçe yerel ses (TTS) modeli
-│   ├── start.sh                # Backend servislerini başlatma betiği
-│   ├── test.py                 # Test komut dosyası
-│   ├── test_push.py            # Push bildirim test dosyası
-│   ├── test_sonuclari_csv.json # CSV modülü test çıktıları
-│   ├── test_sonuclari_sql.json # SQL modülü test çıktıları
-│   ├── .env.example            # Örnek çevresel değişkenler şablonu
-│   ├── requirements.txt        # Python bağımlılıkları
-│   ├── Dockerfile              # Docker yapılandırması
-│   └── docker-compose.yml      # Docker Compose ayarları
+│   ├── api.py              # FastAPI ana uygulama ve endpoint'ler
+│   ├── sql_rag.py          # SQL RAG sorgu motoru
+│   ├── csv_rag.py          # CSV RAG analiz motoru
+│   ├── requirements.txt    # Python bağımlılıkları
+│   ├── Dockerfile          # Docker yapılandırması
+│   └── docker-compose.yml  # Docker Compose ayarları
 ├── mobileapp/
 │   ├── app/
-│   │   ├── _layout.tsx         # Uygulama düzeni (Tab Navigator)
-│   │   ├── index.tsx           # Ana Dashboard (Kaptan Köşkü)
-│   │   ├── herd.tsx            # Sürü Yönetimi ve İnek Listesi
-│   │   ├── stats.tsx           # İstatistik, ABC Analizi ve Grafikler
-│   │   ├── profile.tsx         # Kullanıcı ve Çiftlik Profil Bilgileri
-│   │   └── chat.tsx            # Akıllı Sohbet, STT/TTS ve Bildirimler
+│   │   ├── _layout.tsx     # Uygulama düzeni (Tab Navigator)
+│   │   ├── index.tsx       # Ana Dashboard (Kaptan Köşkü)
+│   │   ├── herd.tsx        # Sürü Yönetimi ve İnek Listesi
+│   │   ├── stats.tsx       # İstatistik, ABC Analizi ve Grafikler
+│   │   ├── profile.tsx     # Kullanıcı ve Çiftlik Profil Bilgileri
+│   │   └── chat.tsx        # Akıllı Sohbet, STT/TTS ve Bildirimler
 │   ├── components/
-│   │   ├── StepIndicator.tsx   # Sorgu adım göstergesi
-│   │   └── MarkdownView.tsx    # Markdown render bileşeni
+│   │   ├── StepIndicator.tsx # Sorgu adım göstergesi
+│   │   └── MarkdownView.tsx  # Markdown render bileşeni
 │   ├── context/
-│   │   └── AuthContext.tsx     # Kimlik doğrulama ve API istemcisi (apiFetch)
+│   │   └── AuthContext.tsx   # Kimlik doğrulama ve API istemcisi (apiFetch)
 │   ├── utils/
-│   │   └── notifications.ts    # Push bildirim yönetimi
-│   └── assets/                 # Görseller ve ikonlar
+│   │   └── notifications.ts  # Push bildirim yönetimi
+│   └── assets/             # Görseller ve ikonlar
 └── README.md
 ```
 
