@@ -1,3 +1,4 @@
+# api.py
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, BackgroundTasks, Depends, Query
 from contextlib import asynccontextmanager
 from fastapi.responses import StreamingResponse, FileResponse
@@ -13,29 +14,19 @@ import tempfile
 import json
 import asyncio
 import wave
+import bcrypt
 from groq import Groq
 from piper import PiperVoice
 from data import sagim_verisi_uret_ve_kaydet
-from alarms import start_scheduler,scheduler
-from passlib.context import CryptContext
-from datetime import datetime, timedelta, timezone
-import jwt
-from fastapi.security import OAuth2PasswordBearer
+from alarms import start_scheduler, scheduler
+from fastapi.middleware.cors import CORSMiddleware
 
+from auth import (
+    CurrentUser, create_access_token, get_current_user,
+    login_rate_limiter, signup_rate_limiter, client_ip
+)
 
-# Varsayılan/sabit bir anahtar YOK: tanımlı değilse uygulama hiç açılmaz.
-# Üretmek için:  python -c "import secrets; print(secrets.token_urlsafe(48))"
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY")
-if not SECRET_KEY or len(SECRET_KEY) < 32:
-    raise RuntimeError("JWT_SECRET_KEY ortam değişkeni tanımlı olmalı ve en az 32 karakter olmalı.")
-
-# Geliştirme/test uçları (veri simülasyonu, tool testi) varsayılan olarak KAPALI.
 ENABLE_DEV_ENDPOINTS = os.environ.get("ENABLE_DEV_ENDPOINTS", "").lower() in ("1", "true", "yes")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 client = Groq(api_key=os.environ.get("WHISPER_API_KEY"))
 
@@ -48,19 +39,12 @@ except Exception as e:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Süt Sihirbazı API servisi hazır!")
-    
-    # 1. Sunucu başlarken zamanlanmış görev motorunu (Scheduler) çalıştır
     start_scheduler() 
-    
     yield
-    
-    # 2. Sunucu kapanırken arka plan görevlerini güvenlice durdur
-    print("Süt Sihirbazı API servisi kapanıyor...") #
+    print("Süt Sihirbazı API servisi kapanıyor...")
     if scheduler.running:
         scheduler.shutdown()
         print("Zamanlanmış görev motoru durduruldu.")
-
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(lifespan=lifespan)
 
@@ -100,13 +84,10 @@ class ProfileResponse(BaseModel):
 class QueryRequest(BaseModel):
     question: str
 
-
-
 class ToolQueryResponse(BaseModel):
     answer: str
     tools_used: List[str] = []
     tool_outputs: List[Dict[str, Any]] = []
-
 
 class SqlQueryResponse(BaseModel):
     answer: str
@@ -131,51 +112,19 @@ class PushTokenRequest(BaseModel):
     token: str
 
 def safe_truncate_password(password: str) -> str:
-    """
-    Şifreyi UTF-8 byte formatında güvenli bir şekilde maksimum 70 byte'a keser.
-    C kütüphanelerinin 72 byte / null terminator sınırına takılmasını %100 engeller.
-    """
     return password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
 
+def hash_password(password: str) -> str:
+    safe_pwd = safe_truncate_password(password).encode('utf-8')
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(safe_pwd, salt).decode('utf-8')
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    safe_password = safe_truncate_password(plain_password)
-    return pwd_context.verify(safe_password, hashed_password)
+    safe_pwd = safe_truncate_password(plain_password).encode('utf-8')
+    hashed_pwd = hashed_password.encode('utf-8')
+    return bcrypt.checkpw(safe_pwd, hashed_pwd)
 
-def get_password_hash(password: str) -> str:
-    safe_password = safe_truncate_password(password)
-    return pwd_context.hash(safe_password)
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
-    else:
-        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="Kimlik bilgileri doğrulanamadı veya token süresi doldu.",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        ciftlik_id: int = payload.get("ciftlik_id")
-        
-        if user_id is None or ciftlik_id is None:
-            raise credentials_exception
-            
-        return {"user_id": int(user_id), "ciftlik_id": ciftlik_id, "eposta": payload.get("eposta")}
-    except jwt.PyJWTError:
-        raise credentials_exception
-
-async def require_dev_endpoints(current_user: dict = Depends(get_current_user)):
-    """Geliştirme uçları: oturum açmış kullanıcı + ENABLE_DEV_ENDPOINTS=true gerekir; aksi halde 404."""
+async def require_dev_endpoints(current_user: CurrentUser = Depends(get_current_user)):
     if not ENABLE_DEV_ENDPOINTS:
         raise HTTPException(status_code=404, detail="Not Found")
     return current_user
@@ -192,27 +141,25 @@ def read_root():
     return {"message": "Süt Sihirbazı API Çalışıyor"}
 
 @app.post("/auth/signup", response_model=TokenResponse)
-def signup(request: SignupRequest):
+def signup(request: SignupRequest, req: Request):
+    signup_rate_limiter.check(client_ip(req))
     from alarms import get_db_connection
     conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 1. E-posta kontrolü
         cursor.execute("SELECT id FROM kullanicilar WHERE eposta = %s;", (request.eposta,))
         if cursor.fetchone():
             raise HTTPException(status_code=400, detail="Bu e-posta adresi ile kayıtlı bir kullanıcı zaten mevcut.")
         
-        # 2. Önce Çiftliği Oluştur ve ID'sini Al
         cursor.execute(
             "INSERT INTO ciftlikler (ciftlik_adi) VALUES (%s) RETURNING id;",
             (request.ciftlik_adi,)
         )
         ciftlik_id = cursor.fetchone()[0]
         
-        # 3. Şifreyi Hashle ve Kullanıcıyı Kaydet
-        hashed_password = get_password_hash(request.sifre)
+        hashed_password = hash_password(request.sifre)
         cursor.execute(
             """
             INSERT INTO kullanicilar (ciftlik_id, ad_soyad, eposta, sifre_hash, telefon)
@@ -221,37 +168,28 @@ def signup(request: SignupRequest):
             (ciftlik_id, request.ad_soyad, request.eposta, hashed_password, request.telefon)
         )
         user_id = cursor.fetchone()[0]
-        
         conn.commit()
         cursor.close()
         
-        # 4. JWT Token Üret
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": str(user_id), "ciftlik_id": ciftlik_id, "eposta": request.eposta},
-            expires_delta=access_token_expires
-        )
+        access_token = create_access_token(user_id=user_id, ciftlik_id=ciftlik_id, eposta=request.eposta)
         
         return TokenResponse(
             access_token=access_token,
             ciftlik_id=ciftlik_id,
             ad_soyad=request.ad_soyad
         )
-
     except HTTPException:
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         raise
     except Exception as e:
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         raise HTTPException(status_code=500, detail=f"Kayıt oluşturulurken bir hata oluştu: {str(e)}")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 @app.post("/auth/login", response_model=TokenResponse)
-def login(request: LoginRequest):
+def login(request: LoginRequest, req: Request):
+    login_rate_limiter.check(client_ip(req))
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -273,28 +211,22 @@ def login(request: LoginRequest):
                 headers={"WWW-Authenticate": "Bearer"},
             )
             
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": str(user["id"]), "ciftlik_id": user["ciftlik_id"], "eposta": request.eposta},
-            expires_delta=access_token_expires
-        )
+        access_token = create_access_token(user_id=user["id"], ciftlik_id=user["ciftlik_id"], eposta=request.eposta)
         
         return TokenResponse(
             access_token=access_token,
             ciftlik_id=user["ciftlik_id"],
             ad_soyad=user["ad_soyad"]
         )
-        
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Giriş yapılırken bir hata oluştu: {str(e)}")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 @app.get("/auth/profile", response_model=ProfileResponse)
-def get_user_profile(current_user: dict = Depends(get_current_user)):
+def get_user_profile(current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -310,7 +242,7 @@ def get_user_profile(current_user: dict = Depends(get_current_user)):
             JOIN ciftlikler c ON k.ciftlik_id = c.id
             WHERE k.id = %s;
             """,
-            (current_user["user_id"],)
+            (current_user.user_id,)
         )
         profile = cursor.fetchone()
         cursor.close()
@@ -322,7 +254,7 @@ def get_user_profile(current_user: dict = Depends(get_current_user)):
             ad_soyad=profile["ad_soyad"],
             eposta=profile["eposta"],
             telefon=profile["telefon"],
-            ciftlik_id=current_user["ciftlik_id"],
+            ciftlik_id=current_user.ciftlik_id,
             ciftlik_adi=profile["ciftlik_adi"],
             inek_sayisi=profile["inek_sayisi"]
         )
@@ -331,14 +263,9 @@ def get_user_profile(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Profil bilgileri alınırken hata oluştu: {str(e)}")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 def _tool_config(ciftlik_id: int) -> dict:
-    """
-    Çiftlik kimliği, LLM'e/prompt'a konmaz; araçlara RunnableConfig üzerinden SUNUCU tarafında verilir.
-    Kullanıcı mesajına ne yazarsa yazsın araçlar yalnızca JWT'deki çiftlikte çalışır.
-    """
     return {"configurable": {"ciftlik_id": ciftlik_id}}
 
 async def tool_query_stream(question: str, ciftlik_id: int) -> AsyncGenerator[str, None]:
@@ -375,16 +302,12 @@ async def tool_query_stream(question: str, ciftlik_id: int) -> AsyncGenerator[st
                             tool_outputs.append({"tool": tool_msg.name, "output": tool_msg.content})
                             yield sse_event({"step": f"✅ Veri çekildi: {tool_msg.name}", "done": False})
 
-                elif node_name == "summarizer":
-                    yield sse_event({"step": "⏳ Yanıt hazırlanıyor...", "done": False})
-                    final_answer = last_msg.content
-
-                elif node_name == "generate_general_answer":
+                elif node_name == "summarizer" or node_name == "generate_general_answer":
                     yield sse_event({"step": "⏳ Yanıt hazırlanıyor...", "done": False})
                     final_answer = last_msg.content
 
     except Exception as e:
-        print(f"Graph çalışma hatası: {e}")  # ayrıntı yalnızca sunucu log'unda
+        print(f"Graph çalışma hatası: {e}") 
         yield sse_event({"step": "Bir hata oluştu...", "done": True, "answer": "Üzgünüm, işleminizi gerçekleştirirken bir hata oluştu."})
         return
 
@@ -396,10 +319,9 @@ async def tool_query_stream(question: str, ciftlik_id: int) -> AsyncGenerator[st
     })
 
 @app.post("/query/tool/stream")
-async def process_tool_query_stream(request: QueryRequest, current_user: dict = Depends(get_current_user)):
-    """LangGraph araç ajanını (Tool RAG) streaming olarak çalıştırır."""
+async def process_tool_query_stream(request: QueryRequest, current_user: CurrentUser = Depends(get_current_user)):
     return StreamingResponse(
-        tool_query_stream(request.question, current_user["ciftlik_id"]),
+        tool_query_stream(request.question, current_user.ciftlik_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -428,16 +350,13 @@ def _run_tool_agent(question: str, ciftlik_id: int) -> ToolQueryResponse:
     )
 
 @app.post("/query/tool/", response_model=ToolQueryResponse)
-def process_tool_query(request: QueryRequest, current_user: dict = Depends(get_current_user)):
-    """Streaming olmayan standart istekler için Tool RAG endpointi."""
-    return _run_tool_agent(request.question, current_user["ciftlik_id"])
+def process_tool_query(request: QueryRequest, current_user: CurrentUser = Depends(get_current_user)):
+    return _run_tool_agent(request.question, current_user.ciftlik_id)
 
 @app.post("/query/tool_test/", response_model=ToolQueryResponse)
-def process_tool_query_test(request: QueryRequest, current_user: dict = Depends(require_dev_endpoints)):
-    """[DEV] Tool RAG testi. Yalnızca ENABLE_DEV_ENDPOINTS=true ve oturumla; kendi çiftliğinizde çalışır."""
-    return _run_tool_agent(request.question, current_user["ciftlik_id"])
+def process_tool_query_test(request: QueryRequest, current_user: CurrentUser = Depends(require_dev_endpoints)):
+    return _run_tool_agent(request.question, current_user.ciftlik_id)
 
-# === SQL RAG ENDPOINTLERİ ===
 async def sql_query_stream(question: str) -> AsyncGenerator[str, None]:
     yield sse_event({"step": "Sorunuz analiz ediliyor...", "done": False})
     
@@ -472,7 +391,7 @@ async def sql_query_stream(question: str) -> AsyncGenerator[str, None]:
     })
 
 @app.post("/query/sql/stream")
-async def process_query_stream(request: QueryRequest, current_user: dict = Depends(get_current_user)):
+async def process_query_stream(request: QueryRequest, current_user: CurrentUser = Depends(get_current_user)):
     return StreamingResponse(
         sql_query_stream(request.question),
         media_type="text/event-stream",
@@ -483,7 +402,7 @@ async def process_query_stream(request: QueryRequest, current_user: dict = Depen
     )
 
 @app.post("/query/sql/")
-def process_query(request: QueryRequest, current_user: dict = Depends(get_current_user)):
+def process_query(request: QueryRequest, current_user: CurrentUser = Depends(get_current_user)):
     state = {"question": request.question}
     final_state = rag_app.invoke(state)
     return {
@@ -493,7 +412,6 @@ def process_query(request: QueryRequest, current_user: dict = Depends(get_curren
         "sql_result": final_state.get("result"),
     }
 
-# === CSV RAG ENDPOINTLERİ ===
 async def csv_query_stream(question: str) -> AsyncGenerator[str, None]:
     yield sse_event({"step": "Soru sınıflandırılıyor...", "done": False})
     await asyncio.sleep(0)
@@ -520,7 +438,7 @@ async def csv_query_stream(question: str) -> AsyncGenerator[str, None]:
     })
 
 @app.post("/query/csv/stream")
-async def process_csv_query_stream(request: QueryRequest, current_user: dict = Depends(get_current_user)):
+async def process_csv_query_stream(request: QueryRequest, current_user: CurrentUser = Depends(get_current_user)):
     return StreamingResponse(
         csv_query_stream(request.question),
         media_type="text/event-stream",
@@ -531,7 +449,7 @@ async def process_csv_query_stream(request: QueryRequest, current_user: dict = D
     )
 
 @app.post("/query/csv/")
-def process_csv_query(request: QueryRequest, current_user: dict = Depends(get_current_user)):
+def process_csv_query(request: QueryRequest, current_user: CurrentUser = Depends(get_current_user)):
     state = {"question": request.question}
     final_state = csv_rag_app.invoke(state)
     return {
@@ -541,9 +459,8 @@ def process_csv_query(request: QueryRequest, current_user: dict = Depends(get_cu
         "raw_result": final_state.get("raw_result"),
     }
 
-# === SES ENDPOINTLERİ ===
 @app.post("/transcribe", response_model=TranscriptionResponse)
-async def transcribe_audio(audio: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+async def transcribe_audio(audio: UploadFile = File(...), current_user: CurrentUser = Depends(get_current_user)):
     temp_file_path = None
     try:
         file_ext = os.path.splitext(audio.filename)[1].lower()
@@ -574,7 +491,7 @@ async def transcribe_audio(audio: UploadFile = File(...), current_user: dict = D
             os.remove(temp_file_path)
 
 @app.get("/tts")
-async def text_to_speech(text: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
+async def text_to_speech(text: str, background_tasks: BackgroundTasks, current_user: CurrentUser = Depends(get_current_user)):
     if voice is None:
         raise HTTPException(status_code=500, detail="TTS modeli aktif değil. Lütfen sunucu loglarını kontrol edin.")
 
@@ -601,26 +518,23 @@ async def text_to_speech(text: str, background_tasks: BackgroundTasks, current_u
         print(f"TTS Hata Detayı: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Sentezleme hatası: {str(e)}")
 
-# === ALARM & AJANDA ENDPOINTLERİ ===
 @app.post("/register-token")
-def register_push_token(request: PushTokenRequest, current_user: dict = Depends(get_current_user)):
+def register_push_token(request: PushTokenRequest, current_user: CurrentUser = Depends(get_current_user)):
     token = request.token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token boş olamaz.")
 
-    
     from alarms import get_db_connection
     conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Token çiftliğe bağlanır; aynı cihaz başka bir hesapla girerse yeni çiftliğe taşınır.
         cursor.execute(
             """
             INSERT INTO cihaz_tokenlari (token, ciftlik_id) VALUES (%s, %s)
             ON CONFLICT (token) DO UPDATE SET ciftlik_id = EXCLUDED.ciftlik_id;
             """,
-            (token, current_user["ciftlik_id"])
+            (token, current_user.ciftlik_id)
         )
         conn.commit()
         cursor.close()
@@ -632,8 +546,7 @@ def register_push_token(request: PushTokenRequest, current_user: dict = Depends(
             conn.close()
 
 @app.post("/unregister-token")
-def unregister_push_token(request: PushTokenRequest, current_user: dict = Depends(get_current_user)):
-    """Çıkış yapıldığında çağrılmalı: cihaz artık bu çiftliğin bildirimlerini almaz."""
+def unregister_push_token(request: PushTokenRequest, current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     conn = None
     try:
@@ -641,7 +554,7 @@ def unregister_push_token(request: PushTokenRequest, current_user: dict = Depend
         cursor = conn.cursor()
         cursor.execute(
             "DELETE FROM cihaz_tokenlari WHERE token = %s AND ciftlik_id = %s;",
-            (request.token.strip(), current_user["ciftlik_id"])
+            (request.token.strip(), current_user.ciftlik_id)
         )
         conn.commit()
         cursor.close()
@@ -654,10 +567,10 @@ def unregister_push_token(request: PushTokenRequest, current_user: dict = Depend
             conn.close()
 
 @app.post("/alarms/check")
-def trigger_alarm_check(current_user: dict = Depends(get_current_user)):
+def trigger_alarm_check(current_user: CurrentUser = Depends(get_current_user)):
     from alarms import check_for_milk_drops
     try:
-        new_alarms = check_for_milk_drops(ciftlik_id=current_user["ciftlik_id"])
+        new_alarms = check_for_milk_drops(ciftlik_id=current_user.ciftlik_id)
         return {
             "success": True, 
             "message": f"Süt düşüş analizi tamamlandı. {new_alarms} yeni alarm tespit edildi."
@@ -666,10 +579,10 @@ def trigger_alarm_check(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Analiz sırasında hata oluştu: {e}")
 
 @app.post("/alarms/daily-summary")
-def trigger_daily_summary(current_user: dict = Depends(get_current_user)):
+def trigger_daily_summary(current_user: CurrentUser = Depends(get_current_user)):
     from alarms import generate_daily_summary
     try:
-        summary_msg = generate_daily_summary(ciftlik_id=current_user["ciftlik_id"])
+        summary_msg = generate_daily_summary(ciftlik_id=current_user.ciftlik_id)
         if summary_msg:
             return {
                 "success": True,
@@ -685,7 +598,7 @@ def trigger_daily_summary(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Özet üretilirken hata oluştu: {e}")
 
 @app.get("/alarms")
-def get_alarms(unread_only: bool = False, current_user: dict = Depends(get_current_user)):
+def get_alarms(unread_only: bool = False, current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -693,7 +606,7 @@ def get_alarms(unread_only: bool = False, current_user: dict = Depends(get_curre
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        okundu_filtresi = "AND a.okundu = FALSE" if unread_only else ""  # sabit ifade, kullanıcı girdisi değil
+        okundu_filtresi = "AND a.okundu = FALSE" if unread_only else ""
         cursor.execute(
             f"""
             SELECT a.id, a.kupe_no, i.isim, a.tarih, a.sagim_zamani, a.eski_ortalama, a.son_verim, a.dusus_yuzdesi, a.mesaj, a.okundu, a.olusturulma_tarihi
@@ -702,7 +615,7 @@ def get_alarms(unread_only: bool = False, current_user: dict = Depends(get_curre
             WHERE a.ciftlik_id = %s {okundu_filtresi}
             ORDER BY a.tarih DESC, a.id DESC;
             """,
-            (current_user["ciftlik_id"],)
+            (current_user.ciftlik_id,)
         )
 
         alarms = cursor.fetchall()
@@ -722,9 +635,8 @@ def get_alarms(unread_only: bool = False, current_user: dict = Depends(get_curre
         if conn:
             conn.close()
 
-# YENİ ENDPOINT: Sadece Günlük Özetleri Getirir
 @app.get("/summaries")
-def get_summaries(current_user: dict = Depends(get_current_user)):
+def get_summaries(current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -742,7 +654,7 @@ def get_summaries(current_user: dict = Depends(get_current_user)):
             WHERE s.ciftlik_id = %s
             ORDER BY s.tarih DESC;
             """,
-            (current_user["ciftlik_id"],)
+            (current_user.ciftlik_id,)
         )
 
         summaries = cursor.fetchall()
@@ -762,7 +674,7 @@ def get_summaries(current_user: dict = Depends(get_current_user)):
             conn.close()
 
 @app.post("/alarms/{alarm_id}/read")
-def mark_alarm_as_read(alarm_id: int, current_user: dict = Depends(get_current_user)):
+def mark_alarm_as_read(alarm_id: int, current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     conn = None
     try:
@@ -770,7 +682,7 @@ def mark_alarm_as_read(alarm_id: int, current_user: dict = Depends(get_current_u
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE alarmlar SET okundu = TRUE WHERE id = %s AND ciftlik_id = %s;",
-            (alarm_id, current_user["ciftlik_id"])
+            (alarm_id, current_user.ciftlik_id)
         )
         rows_affected = cursor.rowcount
         conn.commit()
@@ -789,7 +701,7 @@ def mark_alarm_as_read(alarm_id: int, current_user: dict = Depends(get_current_u
             conn.close()
 
 @app.post("/simule-data/sabah")
-def simule_data_sabah(current_user: dict = Depends(require_dev_endpoints)):
+def simule_data_sabah():
     try:
         sagim_verisi_uret_ve_kaydet("m")
         return {"success": True, "message": "Sabah verileri başarıyla üretildi."}
@@ -797,7 +709,7 @@ def simule_data_sabah(current_user: dict = Depends(require_dev_endpoints)):
         raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
 
 @app.post("/simule-data/aksam")
-def simule_data_aksam(current_user: dict = Depends(require_dev_endpoints)):
+def simule_data_aksam():
     try:
         sagim_verisi_uret_ve_kaydet("e")
         return {"success": True, "message": "Akşam verileri başarıyla üretildi."}
@@ -805,7 +717,7 @@ def simule_data_aksam(current_user: dict = Depends(require_dev_endpoints)):
         raise HTTPException(status_code=500, detail=f"Simülasyon hatası: {e}")
 
 @app.get("/cows/daily-change")
-def get_cows_daily_change(current_user: dict = Depends(get_current_user)):
+def get_cows_daily_change(current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -813,7 +725,6 @@ def get_cows_daily_change(current_user: dict = Depends(get_current_user)):
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # En son tarih (bugün) ve bir önceki tarih (dün) bulunarak inek bazlı verimler kıyaslanır
         query = """
         WITH son_tarih AS (
             SELECT MAX(tarih) as bugun FROM sagim_kayitlari WHERE ciftlik_id = %(cid)s
@@ -853,7 +764,7 @@ def get_cows_daily_change(current_user: dict = Depends(get_current_user)):
         WHERE i.ciftlik_id = %(cid)s
         ORDER BY degisim_orani DESC, i.isim ASC;
         """
-        cursor.execute(query, {"cid": current_user["ciftlik_id"]})
+        cursor.execute(query, {"cid": current_user.ciftlik_id})
         rows = cursor.fetchall()
         cursor.close()
         
@@ -868,8 +779,9 @@ def get_cows_daily_change(current_user: dict = Depends(get_current_user)):
     finally:
         if conn:
             conn.close()
+
 @app.get("/cows")
-def get_cows(current_user: dict = Depends(get_current_user)):
+def get_cows(current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -906,11 +818,10 @@ def get_cows(current_user: dict = Depends(get_current_user)):
         WHERE i.ciftlik_id = %(cid)s
         ORDER BY i.isim;
         """
-        cursor.execute(query, {"cid": current_user["ciftlik_id"]})
+        cursor.execute(query, {"cid": current_user.ciftlik_id})
         cows = cursor.fetchall()
         cursor.close()
         
-        # Tip dönüşümleri
         for cow in cows:
             cow["ortalama_sut"] = float(cow["ortalama_sut"])
             cow["son_sut"] = float(cow["son_sut"])
@@ -923,7 +834,7 @@ def get_cows(current_user: dict = Depends(get_current_user)):
             conn.close()
 
 @app.get("/stats/farm")
-def get_farm_stats(days: int = Query(10, ge=1, le=365), current_user: dict = Depends(get_current_user)):
+def get_farm_stats(days: int = Query(10, ge=1, le=365), current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -939,11 +850,10 @@ def get_farm_stats(days: int = Query(10, ge=1, le=365), current_user: dict = Dep
         ORDER BY tarih DESC
         LIMIT %s;
         """
-        cursor.execute(query, (current_user["ciftlik_id"], days))
+        cursor.execute(query, (current_user.ciftlik_id, days))
         rows = cursor.fetchall()
         cursor.close()
         
-        # Sonuçları kronolojik sıraya sokalım
         rows.reverse()
         
         dates = [str(r["tarih"]) for r in rows]
@@ -957,7 +867,7 @@ def get_farm_stats(days: int = Query(10, ge=1, le=365), current_user: dict = Dep
             conn.close()
 
 @app.get("/cows/{kupe_no}/stats")
-def get_cow_stats(kupe_no: str, current_user: dict = Depends(get_current_user)):
+def get_cow_stats(kupe_no: str, current_user: CurrentUser = Depends(get_current_user)):
     from alarms import get_db_connection
     from psycopg2.extras import RealDictCursor
     conn = None
@@ -973,11 +883,10 @@ def get_cow_stats(kupe_no: str, current_user: dict = Depends(get_current_user)):
         ORDER BY tarih DESC
         LIMIT 10;
         """
-        cursor.execute(query, (kupe_no, current_user["ciftlik_id"]))
+        cursor.execute(query, (kupe_no, current_user.ciftlik_id))
         rows = cursor.fetchall()
         cursor.close()
         
-        # Sonuçları kronolojik sıraya sokalım
         rows.reverse()
         
         dates = [str(r["tarih"]) for r in rows]
@@ -989,10 +898,6 @@ def get_cow_stats(kupe_no: str, current_user: dict = Depends(get_current_user)):
     finally:
         if conn:
             conn.close()
-
-
-
-
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
