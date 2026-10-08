@@ -31,20 +31,20 @@ Uygulamayı açtığınızda sizi chat ekranı  karşılar:
 - **Karşılama:** *"Merhaba, Çiftçi Dostum! Bugün çiftliğin verimi veya ineklerin sağlığı hakkında ne öğrenmek istersin?"*
 - **Kısayol Çipleri:** Ekranın üstünde hızlı sorular için hazır butonlar bulunur (örn: *"⚠️ Riskliler (Düşüş Olanlar)"*).
 - **Bildirim Zili:** Sağ üstteki zil ikonu, okunmamış anomali tespitlerini gösterir. Tıklandığında açılan menüden ilgili ineğe doğrudan yönlenebilirsiniz.
-<img width="720" height="1650" alt="WhatsApp Image 2026-10-05 at 23 03 31 (2)" src="https://github.com/user-attachments/assets/bcd81282-eee5-4cb5-a640-f6dd819e55cb" />
+<img width="720" height="720" alt="WhatsApp Image 2026-10-05 at 23 03 31 (2)" src="https://github.com/user-attachments/assets/bcd81282-eee5-4cb5-a640-f6dd819e55cb" />
 
 ### 2.  Özetler Ekranı
 - **Özet Kartı:** Bugün ve dün üretilen toplam süt, düne göre artış/azalış trendi ve "Günün Şampiyonu" ineği.
 - **Acil Alarmlar:** Sütü düşen riskli ineklerin listesi. Alarma dokunarak okundu olarak işaretleyebilir veya detayına gidebilirsiniz.
 - **Günlük Verim Tablosu:** Özete dokunarak tüm ineklerin günlük değişim oranlarını gösteren detaylı tabloyu açabilirsiniz..
-<img width="720" height="1650" alt="WhatsApp Image 2026-10-05 at 23 03 32" src="https://github.com/user-attachments/assets/1e5ee6d0-6e31-4034-adb6-a50825f41de7" />
+<img width="720" height="720" alt="WhatsApp Image 2026-10-05 at 23 03 32" src="https://github.com/user-attachments/assets/1e5ee6d0-6e31-4034-adb6-a50825f41de7" />
 
 ### 3. 🐄 Sürü Ekranı
 - **Arama:** İsim veya küpe numarasına göre anlık filtreleme yapın.
 - **İnek Kartları:** Her ineğin durumu (Sağlıklı/Riskli), ortalama süt ve son sağım verimi görünür.
 - **Detay Modalı:** Bir ineğe tıkladığınızda son 10 sağım verimini gösteren basit bir çubuk grafik açılır.
 - **Sihirbaza Sor:** Modal içindeki butona basarak o ineğe özel bağlamsal bir soruyu otomatik olarak chat ekranına taşıyın.
-  <img width="720" height="1650" alt="WhatsApp Image 2026-10-05 at 23 03 32 (2)" src="https://github.com/user-attachments/assets/46e77cec-b696-42d7-ac92-dae731f63531" />
+  <img width="720" height="720" alt="WhatsApp Image 2026-10-05 at 23 03 32 (2)" src="https://github.com/user-attachments/assets/46e77cec-b696-42d7-ac92-dae731f63531" />
 
 
 
@@ -53,12 +53,12 @@ Uygulamayı açtığınızda sizi chat ekranı  karşılar:
 - **ABC Segmentasyonu:** Sürünüzü verimliliğe göre Elit (🟡), Standart (🟢) ve Zayıf (🔴) olarak görsel bir çubukla ve listelerle sunar.
 - **Kritik Dalgalanma Raporu:** Kronik riskli veya ani dalgalanma yaşayan inekleri listeler. Listeden bir ineğe tıklayarak yapay zekaya doğrudan "dalgalanma raporu" sorabilirsiniz.
 
-<img width="720" height="1650" alt="WhatsApp Image 2026-10-05 at 23 03 33" src="https://github.com/user-attachments/assets/d1a596f5-333e-4498-9577-770f925cd93d" />
+<img width="720" height="720" alt="WhatsApp Image 2026-10-05 at 23 03 33" src="https://github.com/user-attachments/assets/d1a596f5-333e-4498-9577-770f925cd93d" />
 
 
 ### 5. 👤 Profil Ekranı
 - Çiftlik adı, çiftlik ID'si, toplam inek sayısı, iletişim bilgileri ve uygulama sürümü gibi detayları görüntüleyebilir ve güvenli bir şekilde çıkış yapabilirsiniz.
-<img width="720" height="1650" alt="WhatsApp Image 2026-10-05 at 23 03 33 (3)" src="https://github.com/user-attachments/assets/a0efa86b-ce12-41e4-842e-b21db3266a6e" />
+<img width="720" height="720" alt="WhatsApp Image 2026-10-05 at 23 03 33 (3)" src="https://github.com/user-attachments/assets/a0efa86b-ce12-41e4-842e-b21db3266a6e" />
 
 ---
 
