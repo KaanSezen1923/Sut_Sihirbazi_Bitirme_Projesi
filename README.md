@@ -1,7 +1,7 @@
 ---
 # 🐄 Süt Sihirbazı - Kullanım Kılavuzu
 
-> **Süt Sihirbazı**, süt çiftçiliğiyle uğraşan çiftçiler için geliştirilmiş yapay zekâ destekli, kapsamlı bir mobil asistan uygulamasıdır. İnek sağlığı, çiftlik verimi, yemleme, süt üretimi ve sürü analizi gibi konularda doğal dilde sorular sorarak anında, veriye dayalı yanıtlar alabilirsiniz.
+ **Süt Sihirbazı**, süt çiftçiliğiyle uğraşan çiftçiler için geliştirilmiş yapay zekâ destekli, kapsamlı bir mobil asistan uygulamasıdır. İnek sağlığı, çiftlik verimi, yemleme, süt üretimi ve sürü analizi gibi konularda doğal dilde sorular sorarak anında, veriye dayalı yanıtlar alabilirsiniz.
 
 ---
 
